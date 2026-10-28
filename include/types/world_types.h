@@ -30,10 +30,12 @@ typedef struct {
   float curvature_1pm; /**< center-line curvature at s         */
 } RoadProjection;
 
-/** Lead vehicle drives on the lane center; s is its rear bumper. */
+/** Lead vehicle; s is its rear bumper, offset its lateral lane position. */
 typedef struct {
-  float s_m;   /**< arc length of the rear bumper along the road */
-  float v_mps; /**< speed along the road                         */
+  bool present;   /**< false: no lead vehicle in the world          */
+  float s_m;      /**< arc length of the rear bumper along the road */
+  float v_mps;    /**< speed along the road                         */
+  float offset_m; /**< lateral offset from lane center (left +)     */
 } LeadVehicleState;
 
 /** Complete ground-truth state of the simulated world. */
@@ -49,7 +51,7 @@ typedef struct {
   float e_y_m;      /**< lateral offset from lane center (left +) */
   float e_psi_rad;  /**< heading relative to the lane (CCW +)     */
   float kappa_1pm;  /**< lane curvature at the ego (left +)       */
-  float gap_m;      /**< lead rear face x in the ego frame        */
+  float gap_m;      /**< lead rear x in ego frame (INFINITY: none) */
   float lead_y_m;   /**< lead lateral position in the ego frame   */
   float v_lead_mps; /**< lead speed                               */
 } GroundTruth;

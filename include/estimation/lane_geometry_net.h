@@ -25,7 +25,6 @@
 typedef struct {
   DenseLayer head;                      /**< K -> 3 regression head      */
   float head_w[3 * LANE_N_ANCHORS];     /**< head weights (set at init)  */
-  float head_b[3];                      /**< head bias (zero)            */
   int anchor_row[LANE_N_ANCHORS];       /**< image row of each anchor    */
   float anchor_range_m[LANE_N_ANCHORS]; /**< ground range of each anchor */
   LaneEstimate prev;                    /**< last valid estimate (prior) */

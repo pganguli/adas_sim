@@ -20,8 +20,7 @@ void lead_fusion_init(LeadFusion *f) { memset(f, 0, sizeof(*f)); }
 
 /** True if (x, y) lies inside the ego lane (straight lane if no valid fit). */
 static bool is_in_path(const LaneEstimate *lane, float x, float y) {
-  const float y_center =
-      lane->valid ? lane->c0 + lane->c1 * x + lane->c2 * x * x : 0.0f;
+  const float y_center = lane->valid ? lane_center_y(lane, x) : 0.0f;
   return fabsf(y - y_center) < 0.5f * LANE_WIDTH_NOMINAL_M;
 }
 
@@ -75,7 +74,7 @@ static void kf_predict(LeadFusion *f, float dt) {
   P[0][0] = p00 + q * dt * dt * dt * dt / 4.0f;
   P[0][1] = p01 + q * dt * dt * dt / 2.0f;
   P[1][0] = p10 + q * dt * dt * dt / 2.0f;
-  P[1][1] = P[1][1] + q * dt * dt;
+  P[1][1] += q * dt * dt;
 }
 
 /** Scalar range update with chi-square gating. Returns true if applied. */
@@ -102,15 +101,21 @@ static bool kf_update_range(LeadFusion *f, float z, float r_std) {
   return true;
 }
 
-/** Start a new track from a first range measurement `d` at lateral `y`. */
-static void kf_start(LeadFusion *f, float d, float r_std, float y) {
-  f->has_track = true;
+/** Set x = [d, v_rel] with uncorrelated range std r_std and the initial
+ * relative-speed std. */
+static void kf_set_state(LeadFusion *f, float d, float v_rel, float r_std) {
   f->x[0] = d;
-  f->x[1] = 0.0f;
+  f->x[1] = v_rel;
   f->P[0][0] = r_std * r_std;
   f->P[0][1] = 0.0f;
   f->P[1][0] = 0.0f;
   f->P[1][1] = sqf(FUSION_INIT_VREL_STD);
+}
+
+/** Start a new track from a first range measurement `d` at lateral `y`. */
+static void kf_start(LeadFusion *f, float d, float r_std, float y) {
+  f->has_track = true;
+  kf_set_state(f, d, 0.0f, r_std);
   f->y_m = y;
   f->hits = 1;
   f->misses = 0;
@@ -121,14 +126,9 @@ static void kf_start(LeadFusion *f, float d, float r_std, float y) {
  * Relative speed is re-estimated by differencing consecutive LiDAR ranges.
  */
 static void kf_restart_from_lidar(LeadFusion *f, float d_lidar, float dt) {
-  if (f->has_last_lidar) {
-    f->x[1] = (d_lidar - f->last_lidar_d_m) / dt;
-  }
-  f->x[0] = d_lidar;
-  f->P[0][0] = sqf(FUSION_LIDAR_STD_M);
-  f->P[0][1] = 0.0f;
-  f->P[1][0] = 0.0f;
-  f->P[1][1] = sqf(FUSION_INIT_VREL_STD);
+  const float v_rel =
+      f->has_last_lidar ? (d_lidar - f->last_lidar_d_m) / dt : f->x[1];
+  kf_set_state(f, d_lidar, v_rel, FUSION_LIDAR_STD_M);
   f->lidar_rejects = 0;
 }
 

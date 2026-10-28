@@ -30,21 +30,6 @@ void vehicle_detector_2d_init(VehicleDetector2D *net) {
   net->conv2 = conv2;
 }
 
-/** Find the strongest non-suppressed heat-map cell. Returns its score. */
-static float find_peak(const VehicleDetector2D *net, int *pu, int *pv) {
-  float best = 0.0f;
-  for (int v = 0; v < CAM_H; ++v) {
-    for (int u = 0; u < CAM_W; ++u) {
-      if (!net->suppressed[v][u] && net->heat[v][u] > best) {
-        best = net->heat[v][u];
-        *pu = u;
-        *pv = v;
-      }
-    }
-  }
-  return best;
-}
-
 /** Grow a box from the peak along its row and column (heat > threshold). */
 static BBox2D grow_box(const VehicleDetector2D *net, int pu, int pv,
                        float score) {
@@ -96,9 +81,14 @@ void vehicle_detector_2d_infer(VehicleDetector2D *net, const DenoisedImage *in,
 
   for (int iter = 0; iter < 4 * DET2D_MAX_BOXES && out->n < DET2D_MAX_BOXES;
        ++iter) {
-    int pu = 0;
-    int pv = 0;
-    const float score = find_peak(net, &pu, &pv);
+    const int peak = nn_argmax_unmasked(&net->heat[0][0],
+                                        &net->suppressed[0][0], CAM_H * CAM_W);
+    if (peak < 0) {
+      break;
+    }
+    const int pu = peak % CAM_W;
+    const int pv = peak / CAM_W;
+    const float score = net->heat[pv][pu];
     if (score < DET2D_SCORE_THRESH) {
       break;
     }

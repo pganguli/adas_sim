@@ -16,11 +16,11 @@
 
 void metrics_init(RunMetrics *m) {
   memset(m, 0, sizeof(*m));
-  m->min_bumper_gap_m = 1e9f;
+  m->min_bumper_gap_m = INFINITY;
 }
 
-void metrics_update(RunMetrics *m, const GroundTruth *gt,
-                    const AdasPipeline *p) {
+void metrics_update(RunMetrics *m, const GroundTruth *gt, const AdasPipeline *p,
+                    float delay_ms) {
   const PipelineData *d = &p->data;
   const float bumper_gap = gt->gap_m - VEH_FRONT_OVERHANG_M;
 
@@ -28,6 +28,7 @@ void metrics_update(RunMetrics *m, const GroundTruth *gt,
   m->mode_ticks[d->plan.mode]++;
   m->makespan_ms = p->stats.makespan_ms;
   m->serial_ms = p->stats.serial_ms;
+  m->plan_delay_ms = delay_ms;
   m->sq_err_e_y_true += (double)gt->e_y_m * (double)gt->e_y_m;
 
   if (d->lane.valid) {
@@ -40,12 +41,14 @@ void metrics_update(RunMetrics *m, const GroundTruth *gt,
     m->sq_err_gap += e * e;
     m->n_lead_valid++;
   }
-  if (gt->gap_m > 0.0f && bumper_gap < m->min_bumper_gap_m) {
-    m->min_bumper_gap_m = bumper_gap;
-  }
-  if (gt->gap_m > 0.0f && bumper_gap < 0.0f &&
-      fabsf(gt->lead_y_m) < VEHICLE_WIDTH_M) {
-    m->collision = true;
+  /* Only a lead ahead that overlaps the ego laterally can be hit. */
+  if (gt->gap_m > 0.0f && fabsf(gt->lead_y_m) < VEHICLE_WIDTH_M) {
+    if (bumper_gap < m->min_bumper_gap_m) {
+      m->min_bumper_gap_m = bumper_gap;
+    }
+    if (bumper_gap < 0.0f) {
+      m->collision = true;
+    }
   }
 }
 
@@ -69,8 +72,12 @@ void metrics_print(const RunMetrics *m, FILE *fp) {
           100.0 * m->n_lead_valid / n);
   fprintf(fp, "Gap estimation RMS error : %.3f m\n",
           rms(m->sq_err_gap, m->n_lead_valid));
-  fprintf(fp, "Min bumper-to-bumper gap : %.2f m\n",
-          (double)m->min_bumper_gap_m);
+  if (isfinite(m->min_bumper_gap_m)) {
+    fprintf(fp, "Min bumper-to-bumper gap : %.2f m\n",
+            (double)m->min_bumper_gap_m);
+  } else {
+    fprintf(fp, "Min bumper-to-bumper gap : n/a (no lead in path)\n");
+  }
   fprintf(fp, "Collision                : %s\n", m->collision ? "YES" : "no");
   fprintf(fp, "Time per mode            :");
   for (int i = 0; i < LON_MODE_COUNT; ++i) {
@@ -81,5 +88,11 @@ void metrics_print(const RunMetrics *m, FILE *fp) {
           "\nPipeline latency         : %.1f ms with parallel stages vs %.1f "
           "ms serial\n",
           (double)m->makespan_ms, (double)m->serial_ms);
+  fprintf(fp,
+          "Injected plan delay      : %.0f ms capture -> control (%.0f ms "
+          "sensor + pipeline, rounded up to %.0f ms steps)\n",
+          (double)m->plan_delay_ms,
+          LATENCY_INJECTION ? (double)SENSOR_LATENCY_MS : 0.0,
+          (double)SIM_DT_MS);
   fprintf(fp, "=====================================================\n");
 }

@@ -12,6 +12,8 @@
 #ifndef ADAS_NN_H
 #define ADAS_NN_H
 
+#include <stdint.h>
+
 /** Activation function applied to a layer's output. */
 typedef enum {
   ACT_NONE = 0, /**< identity      */
@@ -93,5 +95,12 @@ void nn_conv2d(const Conv2dLayer *layer, const ConstTensor *in, Tensor *out);
 
 /** out[out_dim] = act(W * in[in_dim] + b). */
 void nn_dense(const DenseLayer *layer, const float *in, float *out);
+
+/**
+ * Index of the first maximum of data[0..n) among entries with mask[i] == 0
+ * and data[i] > 0; -1 if there is none. This is the peak step of the
+ * detectors' peak-decode + NMS loop over a heat map.
+ */
+int nn_argmax_unmasked(const float *data, const uint8_t *mask, int n);
 
 #endif /* ADAS_NN_H */

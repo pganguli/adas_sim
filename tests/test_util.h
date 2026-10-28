@@ -43,6 +43,7 @@ void test_rng(void);
 void test_pid(void);
 void test_nn(void);
 void test_scheduler(void);
+void test_plan_delay(void);
 void test_world(void);
 void test_metrics(void);
 void test_scenario(void);

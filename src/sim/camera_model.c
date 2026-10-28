@@ -68,6 +68,9 @@ static void render_road(const WorldState *w, CameraFrame *out) {
 
 /** Paint the lead vehicle's rear face as a dark rectangle. */
 static void render_lead(const WorldState *w, CameraFrame *out) {
+  if (!w->lead.present) {
+    return;
+  }
   const Vec2 lead = world_lead_in_ego(w);
   if (lead.x < 1.0f) {
     return; /* behind or inside the camera */

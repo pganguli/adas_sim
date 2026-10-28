@@ -6,6 +6,7 @@
 
 #include <assert.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "common/math_utils.h"
 
@@ -42,7 +43,6 @@ void nn_conv2d(const Conv2dLayer *layer, const ConstTensor *in, Tensor *out) {
             for (int kx = 0; kx < k; ++kx) {
               int yy = y + ky - r;
               int xx = x + kx - r;
-              float v;
               if (yy < 0 || yy >= h || xx < 0 || xx >= w) {
                 if (layer->pad == PAD_ZERO) {
                   continue;
@@ -50,10 +50,9 @@ void nn_conv2d(const Conv2dLayer *layer, const ConstTensor *in, Tensor *out) {
                 yy = clampi(yy, 0, h - 1);
                 xx = clampi(xx, 0, w - 1);
               }
-              v = in->data[(ic * h + yy) * w + xx];
               acc +=
                   layer->weight[((oc * layer->in_c + ic) * k + ky) * k + kx] *
-                  v;
+                  in->data[(ic * h + yy) * w + xx];
             }
           }
         }
@@ -73,4 +72,16 @@ void nn_dense(const DenseLayer *layer, const float *in, float *out) {
     }
     out[o] = nn_activate(layer->act, acc);
   }
+}
+
+int nn_argmax_unmasked(const float *data, const uint8_t *mask, int n) {
+  int best = -1;
+  float best_val = 0.0f;
+  for (int i = 0; i < n; ++i) {
+    if (!mask[i] && data[i] > best_val) {
+      best_val = data[i];
+      best = i;
+    }
+  }
+  return best;
 }

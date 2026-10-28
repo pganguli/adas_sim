@@ -27,7 +27,7 @@ void lka_compute(Lka *lka, const LaneEstimate *lane, float v_ego_mps,
   lka->kappa_filt_1pm +=
       LKA_KAPPA_LPF_ALPHA * (lane->kappa_1pm - lka->kappa_filt_1pm);
 
-  out->e_y_front_m = -(lane->c0 + lane->c1 * L + lane->c2 * L * L);
+  out->e_y_front_m = -lane_center_y(lane, L);
   out->e_psi_front_rad = -atanf(lane->c1 + 2.0f * lane->c2 * L);
   out->kappa_1pm = lka->kappa_filt_1pm;
 }

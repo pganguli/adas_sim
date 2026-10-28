@@ -4,6 +4,8 @@
  */
 #include "perception/image_denoise_net.h"
 
+#include <stddef.h>
+
 #include "nn/nn.h"
 #include "params.h"
 #include "types/perception_types.h"
@@ -14,11 +16,9 @@ static const float k_conv1_w[1 * 1 * 3 * 3] = {
     1.0f / 16.0f, 2.0f / 16.0f, 1.0f / 16.0f, 2.0f / 16.0f, 4.0f / 16.0f,
     2.0f / 16.0f, 1.0f / 16.0f, 2.0f / 16.0f, 1.0f / 16.0f,
 };
-static const float k_conv1_b[1] = {0.0f};
 
 void image_denoise_net_init(ImageDenoiseNet *net) {
-  const Conv2dLayer conv1 = {
-      1, 1, 3, k_conv1_w, k_conv1_b, ACT_RELU, PAD_REPLICATE};
+  const Conv2dLayer conv1 = {1, 1, 3, k_conv1_w, NULL, ACT_RELU, PAD_REPLICATE};
   net->conv1 = conv1;
 }
 

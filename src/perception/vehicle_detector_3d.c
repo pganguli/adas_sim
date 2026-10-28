@@ -42,21 +42,6 @@ static void voxelize(VehicleDetector3D *net, const FilteredPointCloud *in) {
   }
 }
 
-/** Find the strongest non-suppressed heat-map cell. Returns its score. */
-static float find_peak(const VehicleDetector3D *net, int *pix, int *piy) {
-  float best = 0.0f;
-  for (int ix = 0; ix < BEV_NX; ++ix) {
-    for (int iy = 0; iy < BEV_NY; ++iy) {
-      if (!net->suppressed[ix][iy] && net->heat[ix][iy] > best) {
-        best = net->heat[ix][iy];
-        *pix = ix;
-        *piy = iy;
-      }
-    }
-  }
-  return best;
-}
-
 /** Fit an axis-aligned box to all points in the 3x3 cells around the peak. */
 static BBox3D fit_box(const FilteredPointCloud *in, int pix, int piy) {
   Vec3 lo = {1e9f, 1e9f, 1e9f};
@@ -117,11 +102,13 @@ void vehicle_detector_3d_infer(VehicleDetector3D *net,
   memset(net->suppressed, 0, sizeof(net->suppressed));
 
   while (out->n < DET3D_MAX_BOXES) {
-    int pix = 0;
-    int piy = 0;
-    if (find_peak(net, &pix, &piy) <= 0.0f) {
+    const int peak = nn_argmax_unmasked(
+        &net->heat[0][0], &net->suppressed[0][0], BEV_NX * BEV_NY);
+    if (peak < 0) {
       break;
     }
+    const int pix = peak / BEV_NY;
+    const int piy = peak % BEV_NY;
     out->boxes[out->n++] = fit_box(in, pix, piy);
     suppress_cells(net, pix, piy);
   }

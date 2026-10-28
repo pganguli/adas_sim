@@ -4,20 +4,22 @@ This is a closed-loop simulation of a highway ADAS stack with Adaptive Cruise Co
 
 Two simulated sensors feed seven small DNNs and a Kalman filter. The DNNs are real conv and dense layers with hand-set weights. The filter output goes to a planner, the planner drives low-level controllers, and the controllers drive a kinematic-bicycle car model. The loop is closed through the simulated world.
 
-It is plain C11 with no dependencies besides `libm` and no heap allocation, and the result is deterministic.
+It is plain C11 with no dependencies besides `libm` and no heap allocation, and the result is deterministic for a given compiler. GCC and clang round some float expressions differently, so their logs differ in the last digits.
 
 ![Closed-loop overview](docs/adas_closed_loop_overview.svg)
 
 ```
-make run            # build + run the default scenario, writes out/log.csv
-make plot           # also writes out/plot.pdf (needs python3 + matplotlib)
+make run            # build + run the selected scenario, writes out/<scenario>_seed<N>.csv
+make plot           # also writes the matching .pdf (needs python3 + matplotlib)
 make debug          # -O0 -g with AddressSanitizer + UBSan
-make test           # unit tests + integration test of the default scenario
+make debug-test     # unit + integration tests under ASan/UBSan
+make test           # unit tests + closed-loop integration tests of every scenario
 make format         # clang-format every source (make format-check to verify)
 make lint           # clang-tidy (needs compile_commands.json, built on demand)
 make check          # format-check + warnings-as-errors build + test + lint
 make clean          # remove build/ (out/ is kept)
 make WERROR=1 ...   # treat compiler warnings as errors in any target
+make CC=gcc ...     # build with another compiler (default: clang)
 ```
 
 ---
@@ -41,7 +43,7 @@ The stages are listed below in DAG order. The program prints the real stage list
 | 4 | `acc` | Spacing policy. |
 | 5 | `behavior_planner` | Arbitration: ACC + LKA → one plan. |
 
-Timing comes from a deterministic DAG scheduler. It executes nodes in topological order, which keeps runs reproducible, and simulates parallel timing: each node starts when its slowest dependency finishes. The run summary reports the critical-path latency next to the latency of a fully serial run (17 ms vs. 39 ms).
+Timing comes from a deterministic DAG scheduler. It executes nodes in topological order, which keeps runs reproducible, and simulates parallel timing: each node starts when its slowest dependency finishes. The run summary reports the critical-path latency next to the latency of a fully serial run (17 ms vs. 39 ms). The critical-path latency is also injected into the closed loop (see [Rates and latency](#rates-and-latency)).
 
 ### The DNNs (all in `src/perception` and `src/estimation`)
 
@@ -72,9 +74,13 @@ All networks are built from two layer types in `src/nn/nn.c` (`Conv2dLayer`, `De
 - **`lateral_controller`**: Stanley, `δ = θ_e + atan(k·e_fa / (v + k_soft))`.
 - **Plant** (`vehicle_model`): kinematic bicycle at the rear axle, with first-order powertrain and steering lags, drag and rolling resistance.
 
-### Rates
+### Rates and latency
 
-The base step is 10 ms. Control and the plant run at 100 Hz. Sensors and the pipeline run at 20 Hz (`PIPELINE_DECIMATION`). The controllers hold the latest plan between pipeline ticks.
+The base step is 10 ms. Control and the plant run at 100 Hz. Sensors and the pipeline run at 20 Hz (`PIPELINE_DECIMATION`).
+
+Each plan goes through a delay line (`pipeline/plan_delay.c`) before the controllers see it. It is released `SENSOR_LATENCY_MS` plus the pipeline's critical-path latency after its sensors were captured, rounded up to whole 10 ms steps. With the defaults that is 20 ms + 17 ms, which rounds up to 40 ms. The controllers hold the newest released plan until the next one arrives (zero-order hold). The `delay_ms` log column and the run summary report the injected delay. Set `LATENCY_INJECTION` to 0 in `config/params.h` to apply each plan in the step its sensors were captured, as before.
+
+The node latencies in `adas_pipeline.c` are nominal figures for production-sized networks on an automotive ECU. They are not the cost of the tiny hand-set networks here, which run in under 0.6 ms each on a desktop CPU.
 
 ---
 
@@ -134,13 +140,14 @@ adas_sim/
 │   ├── estimation/              lane_geometry_net, mono_depth_net, lead_fusion
 │   ├── planning/                acc, lka, behavior_planner
 │   ├── control/                 pid, longitudinal_controller, lateral_controller
-│   ├── pipeline/                scheduler (generic DAG), adas_pipeline (node table + adapters)
+│   ├── pipeline/                scheduler (generic DAG), adas_pipeline (node table + adapters),
+│   │                            plan_delay (latency injection)
 │   └── app/                     main (entry point), sim_runner (multi-rate loop),
 │                                logger (CSV), metrics (KPIs)
 ├── tests/                       test_main.c runner + one test_*.c per module,
-│                                test_scenario.c is the closed-loop integration test
+│                                test_scenario.c runs every scenario closed loop
 ├── docs/                        diagrams used by this README
-└── tools/plot_log.py
+└── tools/                       plot_log.py (PDF), playback_log.py (animation)
 ```
 
 Dependencies point one way:
@@ -153,23 +160,34 @@ types ← nn ← perception ← estimation ← planning ← control ← pipeline
 
 ---
 
-## 4. Default scenario (`src/sim/scenario.c`)
+## 4. Scenarios (`src/sim/scenario.c`)
 
-| Time | Event | Expected reaction |
+Pick the scenario with `SCENARIO_SELECTED` in `config/params.h`. Every road is a straight followed by a left curve. The lead's speed and lateral offset each follow a list of ramp events.
+
+| `ScenarioId` | What happens | What it exercises |
 |---|---|---|
-| 0 s | Ego starts at 22 m/s, 0.5 m off center. Lead is 60 m ahead at 24 m/s. Set speed is 27 m/s. | LKA recenters. ACC moves from CRUISE to FOLLOW. |
-| 8 s | Lead slows to 16 m/s. | ACC follows down at the time gap. |
-| 18 s | Lead brakes to a stop at 8 m/s². | TTC falls below 1.8 s, triggering EMERGENCY_BRAKE. Ego stops behind the lead. |
-| 26 s | Lead accelerates away to 30 m/s. | FOLLOW, then CRUISE once the lead is out of range. |
-
-The road curves left (R = 400 m) after 200 m.
+| `SCENARIO_HIGHWAY_STOP_AND_GO` (default) | Ego at 22 m/s, 0.5 m off center, lead 60 m ahead. The lead slows to 16 m/s at 8 s, brakes to a stop at 8 m/s² at 18 s, and drives off at 26 s. The road curves (R = 400 m) after 200 m. | LKA recentering, CRUISE → FOLLOW → EMERGENCY_BRAKE → CRUISE. |
+| `SCENARIO_FREE_ROAD_CURVE` | No lead. Ego at 15 m/s, 1 m left of center and heading further left, with a 28 m/s set speed and a 300 m curve after 100 m. | Lane recovery, curve holding at about 2.6 m/s² lateral, no ghost targets. |
+| `SCENARIO_CUT_IN` | The lead drives 5 m/s slower in the right-hand lane, 30 m ahead, and cuts in at 1.2 m/s lateral from 2 s on. | In-path target selection: the lead is ignored next door, then followed with hard braking. |
+| `SCENARIO_SLOW_LEAD_APPROACH` | Ego at 30 m/s closes on a truck at 15 m/s that starts 78 m ahead. | Long-range LiDAR tracking and braking at the comfort limit. |
+| `SCENARIO_LEAD_HARD_BRAKE` | Both at 25 m/s, 55 m apart. The lead brakes at 7 m/s² to a stop at 5 s. | AEB at its limit. The ego stops 0.6 m behind with latency injected and 1.2 m behind without; a lead braking at 7.5 m/s² is hit. |
+| `SCENARIO_STOP_AND_GO_TRAFFIC` | A low-speed queue in which the lead stops and restarts three times. | Low-speed following and crawling up to a stopped lead. |
 
 The run ends with a KPI summary:
 - lane and gap estimation RMS error;
 - lane-keeping RMS;
 - minimum gap and whether a collision happened;
 - time spent in each mode;
-- pipeline latency.
+- pipeline latency and the injected plan delay.
+
+Each run writes one CSV row per pipeline tick to `out/<scenario name>_seed<RNG_SEED>.csv`, for example `out/cut_in_seed42.csv`. The directory and file-name pattern are `LOG_DIR` and `LOG_PATH_FMT` in `config/params.h`. The last columns describe the scene (road geometry, where the ego and lead are along the road, the lead's lateral offset), so the tools can redraw any scenario:
+
+```sh
+python3 tools/plot_log.py [log.csv]                 # time-series PDF next to the log
+python3 tools/playback_log.py [log.csv] [--save x.mp4]  # animated chase cam + overview
+```
+
+Both tools default to the newest `out/*.csv`.
 
 ---
 
@@ -177,7 +195,8 @@ The run ends with a KPI summary:
 
 | Command | What it does |
 |---|---|
-| `make test` | Builds `build/release/run_tests` and runs it. Unit tests cover the math helpers, RNG, PID, NN layers, scheduler (ordering, timing, cycle rejection), road geometry and metrics. `test_scenario.c` runs the full default scenario with `sim_run()` and checks safety (no collision, minimum gap), estimation error bounds, mode coverage and bit-for-bit determinism. |
+| `make test` | Builds `build/release/run_tests` and runs it. Unit tests cover the math helpers, RNG, PID, NN layers, scheduler (ordering, timing, cycle rejection), road geometry and metrics. `test_scenario.c` runs the default scenario with `sim_run()` and checks safety (no collision, minimum gap), estimation error bounds, mode coverage, the injected delay and bit-for-bit determinism. It then runs every scenario and checks that none collides and that each reaches the mode it is built for. |
+| `make debug-test` | Builds the tests with `-O0`, AddressSanitizer and UBSan in `build/debug` and runs them. Any UBSan report aborts the run. |
 | `make format` / `make format-check` | clang-format with `.clang-format`. Comments are never reflowed, so aligned tables and diagrams survive formatting. |
 | `make lint` | clang-tidy with `.clang-tidy` (bugprone, cert, clang-analyzer, misc incl. include-cleaner, performance, portability, readability). |
 | `make compile_commands.json` | Compilation database for clangd and clang-tidy. It contains absolute paths, so it is git-ignored and generated per checkout. |
@@ -203,7 +222,10 @@ The scheduler re-sorts the graph automatically and rejects cycles.
 
 | To change | Edit |
 |---|---|
-| Scenario (road, lead behavior, set speed) | `src/sim/scenario.c` |
+| Which scenario runs | `SCENARIO_SELECTED` in `config/params.h` |
+| Scenario definitions (road, lead behavior, set speed) | `src/sim/scenario.c` (add an id to `ScenarioId` in `scenario.h`) |
+| Log directory and file name | `LOG_DIR`, `LOG_PATH_FMT` in `config/params.h` |
+| Latency injection | `LATENCY_INJECTION`, `SENSOR_LATENCY_MS` in `config/params.h`; node latencies in `adas_pipeline.c` |
 | Any tuning (sensor noise, network thresholds, filter noise, ACC gains, plant) | `config/params.h` |
 | Controller (e.g. pure pursuit instead of Stanley) | Replace `lateral_controller.c`. Its interface (`LateralRef` in, steer out) stays the same. |
 | Real threading | Run every node of one scheduler stage on its own thread, with a barrier between stages. The nodes only share data through the blackboard. |
@@ -213,11 +235,11 @@ The scheduler re-sorts the graph automatically and rejects cycles.
 
 ## 7. Known simplifications
 
-- Flat world. A single lane with solid markings. One lead vehicle, which drives on the lane center.
+- Flat world. A single lane with solid markings. At most one other vehicle, which can change its lateral offset (cut-in) but always faces the camera with its rear.
 - Sensors are co-located at the rear axle. The camera has zero pitch and no lens distortion.
 - Camera ranging degrades with distance (about ±1 px quantization at the box bottom). The fusion gate rejects camera ranges beyond about 45 m, and LiDAR carries the track there. That matches real systems; it's intended.
 - `LaneGeometryNet` splits left and right markings at the image center column. This is fine for normal lane keeping, but it is not robust to lane changes.
-- The scheduler simulates parallel timing. It does not run threads.
+- The scheduler simulates parallel timing. It does not run threads. Latency is a fixed delay: there is no jitter, no dropped frames and no timestamp offset between sensors. The actuators add their own first-order lags.
 
 ---
 

@@ -74,7 +74,7 @@ Vec2 world_to_ego(Pose2D ego, Vec2 p) {
 }
 
 Vec2 world_lead_in_ego(const WorldState *w) {
-  const Pose2D lead = road_pose_at(&w->road, w->lead.s_m, 0.0f);
+  const Pose2D lead = road_pose_at(&w->road, w->lead.s_m, w->lead.offset_m);
   const Vec2 p = {lead.x, lead.y};
   return world_to_ego(w->ego.pose, p);
 }
@@ -85,38 +85,39 @@ Vec2 world_lead_in_ego(const WorldState *w) {
 
 void world_init(WorldState *w, const ScenarioConfig *sc) {
   memset(w, 0, sizeof(*w));
-  w->t_s = 0.0;
   w->road = sc->road;
 
   Pose2D ego_pose = road_pose_at(&w->road, 0.0f, sc->ego_init.offset_m);
   ego_pose.psi += sc->ego_init.heading_rad;
   vehicle_model_init(&w->ego, ego_pose, sc->ego_init.speed_mps);
 
+  w->lead.present = sc->lead_init.present;
   w->lead.s_m = sc->lead_init.gap_m; /* ego starts at s = 0 */
   w->lead.v_mps = sc->lead_init.speed_mps;
+  w->lead.offset_m = sc->lead_init.offset_m;
 }
 
-/** The most recent lead event whose start time has passed (or NULL). */
-static const LeadSpeedEvent *active_lead_event(const ScenarioConfig *sc,
-                                               double t_s) {
-  const LeadSpeedEvent *ev = NULL;
-  for (int i = 0; i < sc->n_lead_events; ++i) {
-    if ((double)sc->lead_events[i].t_s <= t_s) {
-      ev = &sc->lead_events[i];
+/** Ramp *x towards the latest event of `prof` that has started by t_s. */
+static void apply_profile(const LeadProfile *prof, double t_s, float dt,
+                          float *x) {
+  const LeadRamp *ev = NULL;
+  for (int i = 0; i < prof->n; ++i) {
+    if ((double)prof->events[i].t_s <= t_s) {
+      ev = &prof->events[i];
     }
   }
-  return ev;
+  if (ev != NULL) {
+    const float max_dx = ev->rate * dt;
+    *x += clampf(ev->target - *x, -max_dx, max_dx);
+  }
 }
 
 void world_step(WorldState *w, const ScenarioConfig *sc, const ActuatorCmd *cmd,
                 float dt) {
   vehicle_model_step(&w->ego, cmd, dt);
 
-  const LeadSpeedEvent *ev = active_lead_event(sc, w->t_s);
-  if (ev != NULL) {
-    const float max_dv = ev->accel_mag_mps2 * dt;
-    w->lead.v_mps += clampf(ev->v_target_mps - w->lead.v_mps, -max_dv, max_dv);
-  }
+  apply_profile(&sc->lead_speed, w->t_s, dt, &w->lead.v_mps);
+  apply_profile(&sc->lead_offset, w->t_s, dt, &w->lead.offset_m);
   w->lead.s_m += w->lead.v_mps * dt;
   w->t_s += (double)dt;
 }
@@ -125,13 +126,19 @@ GroundTruth world_ground_truth(const WorldState *w) {
   GroundTruth gt;
   const Vec2 ego_xy = {w->ego.pose.x, w->ego.pose.y};
   const RoadProjection proj = road_project(&w->road, ego_xy);
-  const Vec2 lead = world_lead_in_ego(w);
 
   gt.e_y_m = proj.offset_m;
   gt.e_psi_rad = wrap_angle(w->ego.pose.psi - proj.heading_rad);
   gt.kappa_1pm = proj.curvature_1pm;
-  gt.gap_m = lead.x;
-  gt.lead_y_m = lead.y;
-  gt.v_lead_mps = w->lead.v_mps;
+  if (w->lead.present) {
+    const Vec2 lead = world_lead_in_ego(w);
+    gt.gap_m = lead.x;
+    gt.lead_y_m = lead.y;
+    gt.v_lead_mps = w->lead.v_mps;
+  } else {
+    gt.gap_m = INFINITY;
+    gt.lead_y_m = 0.0f;
+    gt.v_lead_mps = 0.0f;
+  }
   return gt;
 }

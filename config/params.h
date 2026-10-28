@@ -17,8 +17,35 @@
 #define SIM_DT_S 0.01f        /* plant + low-level control: 100 Hz          */
 #define PIPELINE_DECIMATION 5 /* sensors/perception/planning every N steps  */
 #define PIPELINE_DT_S (SIM_DT_S * PIPELINE_DECIMATION) /* -> 20 Hz          */
+#define SIM_DT_MS (SIM_DT_S * 1000.0f) /* base step in milliseconds         */
 #define RNG_SEED 42u
 #define CONSOLE_PRINT_PERIOD_S 2.0f
+
+/* Scenario to run: one of the ScenarioId values in include/sim/scenario.h
+ * (SCENARIO_HIGHWAY_STOP_AND_GO, SCENARIO_FREE_ROAD_CURVE, SCENARIO_CUT_IN,
+ * SCENARIO_SLOW_LEAD_APPROACH, SCENARIO_LEAD_HARD_BRAKE,
+ * SCENARIO_STOP_AND_GO_TRAFFIC). */
+#define SCENARIO_SELECTED SCENARIO_HIGHWAY_STOP_AND_GO
+
+/* ======================================================================== */
+/* Output                                                                   */
+/* ======================================================================== */
+#define LOG_DIR "out"
+/* CSV log per run: printf format, filled with the scenario name and
+ * RNG_SEED, e.g. out/highway_follow_stop_and_go_seed42.csv.               */
+#define LOG_PATH_FMT LOG_DIR "/%s_seed%u.csv"
+#define LOG_PATH_MAX 256 /* buffer size for the formatted path              */
+
+/* ======================================================================== */
+/* Latency injection                                                        */
+/* ======================================================================== */
+/* A plan reaches the controllers SENSOR_LATENCY_MS + the pipeline's
+ * critical path (sum of node latency_ms along it, adas_pipeline.c) after
+ * its sensor capture, rounded up to whole SIM_DT_S steps.
+ * 0 = the plan is applied in the step its sensors were captured.           */
+#define LATENCY_INJECTION 1
+/* Capture -> pipeline input: exposure, readout, ISP and transport.         */
+#define SENSOR_LATENCY_MS 20.0f
 
 /* ======================================================================== */
 /* Front camera: pinhole, zero pitch/roll, mounted at the vehicle reference */

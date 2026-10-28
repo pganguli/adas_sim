@@ -4,6 +4,7 @@
  */
 #include "pipeline/scheduler.h"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -76,8 +77,7 @@ void scheduler_run(const Scheduler *s, void *ctx, SchedulerStats *stats) {
 
     float start = 0.0f;
     for (int d = 0; d < node->n_deps; ++d) {
-      const float dep_finish = stats->finish_ms[node->deps[d]];
-      start = (dep_finish > start) ? dep_finish : start;
+      start = fmaxf(start, stats->finish_ms[node->deps[d]]);
     }
 
     node->fn(ctx);
@@ -85,9 +85,7 @@ void scheduler_run(const Scheduler *s, void *ctx, SchedulerStats *stats) {
     stats->start_ms[i] = start;
     stats->finish_ms[i] = start + node->latency_ms;
     stats->serial_ms += node->latency_ms;
-    if (stats->finish_ms[i] > stats->makespan_ms) {
-      stats->makespan_ms = stats->finish_ms[i];
-    }
+    stats->makespan_ms = fmaxf(stats->makespan_ms, stats->finish_ms[i]);
   }
 }
 

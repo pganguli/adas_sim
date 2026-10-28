@@ -50,6 +50,9 @@ static void add_ground(LidarScan *scan, Rng *rng) {
 
 /** Lead-vehicle rear-face returns; density falls with range. */
 static void add_lead(LidarScan *scan, Rng *rng, const WorldState *w) {
+  if (!w->lead.present) {
+    return;
+  }
   const Vec2 lead = world_lead_in_ego(w);
   if (lead.x < 1.0f || lead.x > LIDAR_MAX_RANGE_M) {
     return;

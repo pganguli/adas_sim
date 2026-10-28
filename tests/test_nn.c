@@ -2,6 +2,8 @@
  * @file test_nn.c
  * @brief Tests for the dense and convolution layers.
  */
+#include <stdint.h>
+
 #include "nn/nn.h"
 #include "test_util.h"
 
@@ -58,4 +60,13 @@ void test_nn(void) {
   /* tensor_as_const keeps shape and data. */
   const ConstTensor view = tensor_as_const(&ot);
   CHECK(view.c == 1 && view.h == 3 && view.w == 3 && view.data == out);
+
+  /* Masked argmax: first maximum among unmasked, strictly positive cells. */
+  const float heat[5] = {0.2f, 0.9f, 0.5f, 0.9f, -1.0f};
+  uint8_t mask[5] = {0, 0, 0, 0, 0};
+  CHECK(nn_argmax_unmasked(heat, mask, 5) == 1); /* tie: first wins */
+  mask[1] = 1;
+  CHECK(nn_argmax_unmasked(heat, mask, 5) == 3);
+  mask[0] = mask[2] = mask[3] = 1;
+  CHECK(nn_argmax_unmasked(heat, mask, 5) == -1); /* only a negative left */
 }

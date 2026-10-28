@@ -5,6 +5,7 @@
 #include "estimation/lane_geometry_net.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "common/camera_geometry.h"
@@ -41,8 +42,7 @@ void lane_geometry_net_init(LaneGeometryNet *net) {
   float AtA_inv[3][3];
 
   memset(net, 0, sizeof(*net));
-  const DenseLayer head = {LANE_N_ANCHORS, 3, net->head_w, net->head_b,
-                           ACT_NONE};
+  const DenseLayer head = {LANE_N_ANCHORS, 3, net->head_w, NULL, ACT_NONE};
   net->head = head;
 
   /* Design matrix A: one row [1, X, X^2] per anchor. */
@@ -122,8 +122,7 @@ void lane_geometry_net_infer(LaneGeometryNet *net, const LaneMask *in,
     } else if (has_r) {
       center[k] = cam_col_to_lateral(u_r, X) + half_lane;
     } else if (net->prev.valid) {
-      const LaneEstimate *p = &net->prev;
-      center[k] = p->c0 + p->c1 * X + p->c2 * X * X; /* impute from prior */
+      center[k] = lane_center_y(&net->prev, X); /* impute from prior */
       n_missing++;
     } else {
       n_missing = LANE_N_ANCHORS; /* no prior: give up */

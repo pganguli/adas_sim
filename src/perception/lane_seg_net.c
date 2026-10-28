@@ -9,28 +9,20 @@
 #include "types/perception_types.h"
 
 /* conv1 weights: [out_c=2][in_c=1][3][3] */
+#define M8 (-1.0f / 8.0f)
 static const float k_conv1_w[2 * 1 * 3 * 3] = {
+    /* clang-format off */
     /* ch0: brightness (center tap only) */
-    0.0f,
-    0.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    0.0f,
-    0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 1.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
     /* ch1: ridge / negative Laplacian (thin bright lines, any orientation) */
-    -1.0f / 8.0f,
-    -1.0f / 8.0f,
-    -1.0f / 8.0f,
-    -1.0f / 8.0f,
-    1.0f, /* = 8/8 */
-    -1.0f / 8.0f,
-    -1.0f / 8.0f,
-    -1.0f / 8.0f,
-    -1.0f / 8.0f,
+    M8,   M8,   M8,
+    M8,   1.0f, M8,
+    M8,   M8,   M8,
+    /* clang-format on */
 };
+#undef M8
 static const float k_conv1_b[2] = {-LANESEG_BRIGHT_LEVEL, 0.0f};
 
 /* conv2 weights: [out_c=1][in_c=2][1][1] */

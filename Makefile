@@ -2,9 +2,10 @@
 # ADAS closed-loop simulator
 #
 #   make                  build (optimized)             -> build/release/adas_sim
-#   make run              build + run the scenario      -> out/log.csv
+#   make run              build + run the scenario      -> out/<scenario>_seed<N>.csv
 #   make debug            -O0 -g + ASan/UBSan build     -> build/debug/adas_sim
-#   make plot             run + plot (python3 + matplotlib) -> out/plot.pdf
+#   make debug-test       unit/integration tests under ASan/UBSan
+#   make plot             run + plot (python3 + matplotlib) -> out/<log>.pdf
 #   make test             build + run unit/integration tests
 #   make format           reformat all sources with clang-format
 #   make format-check     fail if any source is not clang-format clean
@@ -14,11 +15,16 @@
 #   make clean            remove build/ (out/ is kept)
 #
 #   make WERROR=1 ...     treat compiler warnings as errors
+#   make CC=gcc ...       use another compiler (default: clang)
 #
 # New .c files anywhere under src/ or tests/ are picked up automatically.
 # ---------------------------------------------------------------------------
 
-CC       ?= gcc
+# Make predefines CC=cc, so `CC ?= clang` would never apply: replace only
+# that built-in default (`make CC=gcc` or an exported CC still wins).
+ifeq ($(origin CC),default)
+CC       := clang
+endif
 BUILD    ?= build/release
 WERROR   ?= 0
 TARGET   := $(BUILD)/adas_sim
@@ -50,7 +56,7 @@ LDLIBS   := -lm
 
 FORMAT_FILES := $(SRCS) $(TEST_SRCS) $(HDRS)
 
-.PHONY: all run debug plot test format format-check lint check clean
+.PHONY: all run debug debug-test plot test format format-check lint check clean
 
 all: $(TARGET)
 
@@ -67,12 +73,19 @@ $(BUILD)/%.o: %.c
 run: $(TARGET)
 	./$(TARGET)
 
+# ASan + UBSan; any UBSan report aborts, so it fails the run.
+SANITIZE := -fsanitize=address,undefined -fno-sanitize-recover=all
+DEBUG_VARS := BUILD=build/debug OPTFLAGS="-O0 -g3 $(SANITIZE)" \
+              LDFLAGS="$(SANITIZE)"
+
 debug:
-	$(MAKE) BUILD=build/debug OPTFLAGS="-O0 -g3 -fsanitize=address,undefined" \
-	        LDFLAGS="-fsanitize=address,undefined"
+	$(MAKE) $(DEBUG_VARS)
+
+debug-test:
+	$(MAKE) $(DEBUG_VARS) test
 
 plot: run
-	python3 tools/plot_log.py out/log.csv out/plot.pdf
+	python3 tools/plot_log.py
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)

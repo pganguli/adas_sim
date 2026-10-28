@@ -25,7 +25,7 @@ Pose2D road_pose_at(const RoadGeometry *road, float s_m, float offset_m);
 /** Transform a world point into the ego frame of `ego`. */
 Vec2 world_to_ego(Pose2D ego, Vec2 p_world);
 
-/** Lead vehicle rear-bumper center in the ego frame. */
+/** Lead vehicle rear-bumper center in the ego frame (only if present). */
 Vec2 world_lead_in_ego(const WorldState *w);
 
 /** Ground-truth lane errors and lead state for logging / metrics. */

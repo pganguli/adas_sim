@@ -4,6 +4,8 @@
  */
 #include "estimation/mono_depth_net.h"
 
+#include <stddef.h>
+
 #include "common/camera_geometry.h"
 #include "nn/nn.h"
 #include "params.h"
@@ -25,13 +27,11 @@ static const float k_fc1_w[3 * 3] = {
     0.0f,                   0.0f,                      CAM_FX * VEHICLE_WIDTH_M,
     /* clang-format on */
 };
-static const float k_fc1_b[3] = {0.0f, 0.0f, 0.0f};
 static const float k_fc2_w[1 * 3] = {0.6f, 0.2f, 0.2f};
-static const float k_fc2_b[1] = {0.0f};
 
 void mono_depth_net_init(MonoDepthNet *net) {
-  const DenseLayer fc1 = {3, 3, k_fc1_w, k_fc1_b, ACT_RELU};
-  const DenseLayer fc2 = {3, 1, k_fc2_w, k_fc2_b, ACT_NONE};
+  const DenseLayer fc1 = {3, 3, k_fc1_w, NULL, ACT_RELU};
+  const DenseLayer fc2 = {3, 1, k_fc2_w, NULL, ACT_NONE};
   net->fc1 = fc1;
   net->fc2 = fc2;
 }

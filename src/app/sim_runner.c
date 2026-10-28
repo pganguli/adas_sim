@@ -11,10 +11,14 @@
  *   lateral control (Stanley)    logging / metrics
  *   plant + world update
  *
- * The controllers always use the most recent PlanOutput (zero-order hold).
+ * Each plan enters a delay line and reaches the controllers
+ * SENSOR_LATENCY_MS + the pipeline's critical-path latency after its sensor
+ * capture (rounded up to whole steps). The controllers hold the newest
+ * released plan (zero-order hold).
  */
 #include "app/sim_runner.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -25,6 +29,7 @@
 #include "control/longitudinal_controller.h"
 #include "params.h"
 #include "pipeline/adas_pipeline.h"
+#include "pipeline/plan_delay.h"
 #include "pipeline/scheduler.h"
 #include "planning/behavior_planner.h"
 #include "sim/camera_model.h"
@@ -39,6 +44,12 @@
 /* Large objects are static so they don't live on the stack. */
 static AdasPipeline g_pipeline;
 static SensorFrame g_sensors;
+
+/** Sim steps from sensor capture to plan release (latency rounded up). */
+static int latency_steps(float latency_ms) {
+  /* The tolerance keeps exact multiples of the step from rounding up. */
+  return (int)ceilf(latency_ms / SIM_DT_MS - 1e-4f);
+}
 
 /** Print one console status line (ground truth next to estimates). */
 static void print_status(FILE *fp, const WorldState *w, const GroundTruth *gt,
@@ -60,6 +71,7 @@ int sim_run(const ScenarioConfig *sc, const SimOptions *opt,
   Rng rng_lidar;
   Rng rng_ego;
   LongitudinalController lon_ctrl;
+  PlanDelay plan_delay;
   ActuatorCmd cmd = {0.0f, 0.0f, 0.0f};
   Logger logger = {NULL};
   uint32_t seq = 0u;
@@ -70,6 +82,7 @@ int sim_run(const ScenarioConfig *sc, const SimOptions *opt,
   rng_seed(&rng_lidar, RNG_SEED + 2u);
   rng_seed(&rng_ego, RNG_SEED + 3u);
   longitudinal_controller_init(&lon_ctrl);
+  plan_delay_init(&plan_delay);
   metrics_init(metrics);
 
   if (adas_pipeline_init(&g_pipeline) != 0) {
@@ -105,9 +118,16 @@ int sim_run(const ScenarioConfig *sc, const SimOptions *opt,
 
       adas_pipeline_run(&g_pipeline, &g_sensors, &sc->driver);
 
+      const float latency_ms =
+          LATENCY_INJECTION ? SENSOR_LATENCY_MS + g_pipeline.stats.makespan_ms
+                            : 0.0f;
+      const int delay_steps = latency_steps(latency_ms);
+      const float delay_ms = (float)delay_steps * SIM_DT_MS;
+      plan_delay_push(&plan_delay, &g_pipeline.data.plan, step + delay_steps);
+
       const GroundTruth gt = world_ground_truth(&world);
-      logger_write(&logger, &world, &gt, &g_pipeline, &cmd);
-      metrics_update(metrics, &gt, &g_pipeline);
+      logger_write(&logger, &world, &gt, &g_pipeline, &cmd, delay_ms);
+      metrics_update(metrics, &gt, &g_pipeline, delay_ms);
       if (opt->console != NULL && step % print_every == 0) {
         print_status(opt->console, &world, &gt, &g_pipeline);
       }
@@ -122,7 +142,7 @@ int sim_run(const ScenarioConfig *sc, const SimOptions *opt,
     }
 
     /* 100 Hz: low-level control -> actuators -> plant */
-    const PlanOutput *plan = &g_pipeline.data.plan;
+    const PlanOutput *plan = plan_delay_poll(&plan_delay, step);
     longitudinal_controller_step(&lon_ctrl, plan->a_des_mps2, &ego_meas,
                                  SIM_DT_S, &cmd);
     lateral_controller_step(&plan->lat, ego_meas.v_mps, &cmd);

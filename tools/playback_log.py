@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Animate the ego and lead car from out/log.csv produced by adas_sim.
+"""Animate the ego and lead car from a CSV log produced by adas_sim.
 
 usage: python3 tools/playback_log.py [log.csv] [--speed X] [--save out.mp4|out.gif]
+Without a log argument the newest out/*.csv is used.
 Requires matplotlib (pip install matplotlib); --save needs ffmpeg (mp4) or
 pillow (gif). Without --save an interactive window is opened.
 
-The log holds no absolute positions, so the scene is reconstructed:
-  ego  : arc length s integrated from v_ego and the lane errors, lateral
-         offset e_y_true and heading e_psi_true relative to the road
-  lead : s = s_ego + gap_true (the lead's rear bumper, as in the simulator)
-The road geometry (straight, then a left curve) mirrors src/sim/scenario.c;
-adjust the constants below if the scenario changes.
+The scene is redrawn from the log's ground-truth scene columns, so every
+scenario plays back exactly:
+  road : road_straight_m, road_radius_m, lane_width_m (straight, then a left
+         curve)
+  ego  : arc length ego_s_m, lateral offset e_y_true_m and heading
+         e_psi_true_rad relative to the road
+  lead : arc length lead_s_m (its rear bumper) and lateral offset
+         lead_offset_m; hidden when lead_present is 0
 
 Layout (all map views are true scale):
   top          chase camera that follows the ego around the road
@@ -19,27 +22,22 @@ Layout (all map views are true scale):
 """
 
 import argparse
-import csv
 import math
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
 
 import matplotlib
 import numpy as np
-import numpy.typing as npt
+from log_utils import MODE_NAMES, FloatArray, latest_log, load
 
-FloatArray = npt.NDArray[np.floating[Any]]
-
-MODE_NAMES = {0: "OFF", 1: "CRUISE", 2: "FOLLOW", 3: "EBRAKE"}
 MODE_COLORS = {0: "gray", 1: "tab:green", 2: "tab:blue", 3: "tab:red"}
 LEAD_COLOR = "tab:orange"
 
-# Road (scenario.c) and vehicle (config/params.h) geometry.
-STRAIGHT_LEN_M = 200.0
-RADIUS_M = 400.0
-LANE_WIDTH_M = 3.5
+# Vehicle geometry: front overhang and width match config/params.h
+# (VEH_FRONT_OVERHANG_M, VEHICLE_WIDTH_M); the rear overhang is drawing-only.
 VEH_FRONT_M = 3.8  # rear axle (ego reference point) -> front bumper
 VEH_REAR_M = 0.9  # rear axle -> rear bumper
-VEH_WIDTH_M = 1.9
+VEH_WIDTH_M = 1.8
 
 # Chase camera: centered on the road this far ahead of the ego, showing
 # +-HALF_LEN along the road and [Y_MIN, Y_MAX] across it.
@@ -61,22 +59,24 @@ LEAD_SHAPE = box(0.0, VEH_FRONT_M + VEH_REAR_M, -VEH_WIDTH_M / 2, VEH_WIDTH_M / 
 CHASE_WINDOW = box(-CHASE_HALF_LEN_M, CHASE_HALF_LEN_M, CHASE_Y_MIN_M, CHASE_Y_MAX_M)
 
 
-def load(path: str) -> dict[str, FloatArray]:
-    with open(path, newline="") as f:
-        rows = list(csv.DictReader(f))
-    return {k: np.array([float(r[k]) for r in rows]) for k in rows[0]}
+@dataclass(frozen=True)
+class Road:
+    """Straight along world +x, then a left arc (as in src/sim/world.c)."""
 
+    straight_len_m: float
+    radius_m: float
+    lane_width_m: float
 
-def road_pose(s: FloatArray, offset: FloatArray | float = 0.0) -> FloatArray:
-    """World (x, y, heading) rows of the road points at arc length s, offset left.
+    def pose(self, s: FloatArray, offset: FloatArray | float = 0.0) -> FloatArray:
+        """World (x, y, heading) rows of the points at arc length s, offset left.
 
-    One formula covers both segments: on the straight theta is 0, so x = s
-    and y = offset.
-    """
-    theta = np.maximum(s - STRAIGHT_LEN_M, 0.0) / RADIUS_M
-    r = RADIUS_M - offset
-    x = np.minimum(s, STRAIGHT_LEN_M) + r * np.sin(theta)
-    return np.stack([x, RADIUS_M - r * np.cos(theta), theta], axis=-1)
+        One formula covers both segments: on the straight theta is 0, so x = s
+        and y = offset.
+        """
+        theta = np.maximum(s - self.straight_len_m, 0.0) / self.radius_m
+        r = self.radius_m - offset
+        x = np.minimum(s, self.straight_len_m) + r * np.sin(theta)
+        return np.stack([x, self.radius_m - r * np.cos(theta), theta], axis=-1)
 
 
 def place(shape: FloatArray, pose: FloatArray) -> FloatArray:
@@ -86,20 +86,9 @@ def place(shape: FloatArray, pose: FloatArray) -> FloatArray:
     return out
 
 
-def reconstruct(d: dict[str, FloatArray]) -> tuple[FloatArray, FloatArray]:
-    """Return ego s and lead s per log row."""
-    t, v, e_y, e_psi = d["t_s"], d["v_ego_mps"], d["e_y_true_m"], d["e_psi_true_rad"]
-    s_ego = np.zeros_like(t)
-    for i in range(1, len(t)):
-        k = 1.0 / RADIUS_M if s_ego[i - 1] > STRAIGHT_LEN_M else 0.0
-        s_dot = v[i - 1] * math.cos(e_psi[i - 1]) / (1.0 - k * e_y[i - 1])
-        s_ego[i] = s_ego[i - 1] + s_dot * (t[i] - t[i - 1])
-    return s_ego, s_ego + d["gap_true_m"]
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
-    ap.add_argument("log", nargs="?", default="out/log.csv")
+    ap.add_argument("log", nargs="?", help="CSV log (default: newest out/*.csv)")
     ap.add_argument(
         "--speed", type=float, default=1.0, help="playback speed (default 1)"
     )
@@ -115,17 +104,24 @@ def main() -> None:
     from matplotlib.patches import FancyArrowPatch, Patch, Polygon
     from matplotlib.transforms import Affine2D
 
-    d = load(args.log)
+    log_path = args.log or latest_log()
+    d = load(log_path)
     t, mode = d["t_s"], d["mode"].astype(int)
-    s_ego, s_lead = reconstruct(d)
+    road = Road(
+        float(d["road_straight_m"][0]),
+        float(d["road_radius_m"][0]),
+        float(d["lane_width_m"][0]),
+    )
+    has_lead = bool(d["lead_present"][0])
+    s_ego, s_lead, lead_offset = d["ego_s_m"], d["lead_s_m"], d["lead_offset_m"]
     stride = max(1, args.stride)
     dt_ms = (t[1] - t[0]) * 1000.0 * stride
-    bumper_gap = d["gap_true_m"] - VEH_FRONT_M
+    bumper_gap = d["gap_true_m"] - VEH_FRONT_M  # inf when there is no lead
 
-    ego_pose = road_pose(s_ego, d["e_y_true_m"])  # rear axle
+    ego_pose = road.pose(s_ego, d["e_y_true_m"])  # rear axle
     ego_pose[:, 2] += d["e_psi_true_rad"]
-    lead_pose = road_pose(s_lead)  # rear bumper
-    chase_pose = road_pose(s_ego + CHASE_AHEAD_M)
+    lead_pose = road.pose(s_lead, lead_offset)  # rear bumper
+    chase_pose = road.pose(s_ego + CHASE_AHEAD_M)
 
     fig = plt.figure(figsize=(13, 8.5))
     gs = fig.add_gridspec(
@@ -147,9 +143,17 @@ def main() -> None:
     sp, gp, ac = (fig.add_subplot(gs[r, 1]) for r in (1, 2, 3))
 
     # --- road geometry in world coordinates ---
-    ss = np.arange(0.0, s_lead.max() + 2 * CHASE_HALF_LEN_M, 1.0)
-    half, shoulder = LANE_WIDTH_M / 2, LANE_WIDTH_M / 2 + 1.0
-    surface = np.vstack([road_pose(ss, shoulder), road_pose(ss[::-1], -shoulder)])
+    s_end = max(s_ego.max(), s_lead.max() if has_lead else 0.0)
+    ss = np.arange(0.0, s_end + 2 * CHASE_HALF_LEN_M, 1.0)
+    half = road.lane_width_m / 2
+    # Paved area: the ego lane plus wherever the lead drives (e.g. the lane
+    # it cuts in from), with a 1 m shoulder.
+    left, right = half, -half
+    if has_lead:
+        left = max(left, float(lead_offset.max()) + half)
+        right = min(right, float(lead_offset.min()) - half)
+    left, right = left + 1.0, right - 1.0
+    surface = np.vstack([road.pose(ss, left), road.pose(ss[::-1], right)])
     s_posts = np.arange(0.0, ss[-1], POST_SPACING_M)
 
     # --- chase camera: world artists drawn through a per-frame view transform ---
@@ -158,9 +162,9 @@ def main() -> None:
     chase.set_facecolor("#c9dcb5")
     chase.add_patch(Polygon(surface[:, :2], fc="#5f6368", transform=to_view))
     for off in (half, -half):
-        e = road_pose(ss, off)
+        e = road.pose(ss, off)
         chase.plot(e[:, 0], e[:, 1], color="white", lw=1.6, transform=to_view)
-    c = road_pose(ss)
+    c = road.pose(ss)
     chase.plot(
         c[:, 0],
         c[:, 1],
@@ -170,8 +174,8 @@ def main() -> None:
         ls=(0, (6, 6)),
         transform=to_view,
     )
-    for off in (shoulder + 0.5, -shoulder - 0.5):
-        p = road_pose(s_posts, off)
+    for off in (left + 0.5, right - 0.5):
+        p = road.pose(s_posts, off)
         chase.plot(p[:, 0], p[:, 1], "s", color="#3b3b3b", ms=3, transform=to_view)
     ego_car = Polygon(EGO_SHAPE, ec="black", transform=to_view)
     lead_car = Polygon(LEAD_SHAPE, fc=LEAD_COLOR, ec="black", transform=to_view)
@@ -185,6 +189,7 @@ def main() -> None:
     )
     for patch in (ego_car, lead_car, gap_arrow):
         chase.add_patch(patch)
+        patch.set_visible(has_lead or patch is ego_car)
     gap_label = chase.text(
         0,
         0,
@@ -196,11 +201,16 @@ def main() -> None:
         fontsize=9,
         fontweight="bold",
         bbox={"fc": "#3c4043", "ec": "none"},
+        visible=has_lead,
     )
     chase.set_xlim(-CHASE_HALF_LEN_M, CHASE_HALF_LEN_M)
     chase.set_ylim(CHASE_Y_MIN_M, CHASE_Y_MAX_M)
     chase.set_aspect("equal")
-    chase.set_title("chase camera (true scale, road-aligned)", fontsize=10, loc="left")
+    chase.set_title(
+        f"{Path(log_path).stem}: chase camera (true scale, road-aligned)",
+        fontsize=10,
+        loc="left",
+    )
     chase.set_xlabel("[m]")
     chase.tick_params(labelsize=8)
     chase.legend(
@@ -209,7 +219,7 @@ def main() -> None:
                 Patch(fc=MODE_COLORS[m], ec="black", label=f"ego ({MODE_NAMES[m]})")
                 for m in (1, 2, 3)
             ),
-            Patch(fc=LEAD_COLOR, ec="black", label="lead"),
+            *([Patch(fc=LEAD_COLOR, ec="black", label="lead")] if has_lead else []),
         ],
         loc="upper right",
         fontsize=8,
@@ -239,6 +249,7 @@ def main() -> None:
     window = Polygon(CHASE_WINDOW, fill=False, ls="--")
     for patch in (ov_ego, ov_lead, window):
         overview.add_patch(patch)
+    ov_lead.set_visible(has_lead)
     overview.set_aspect("equal")
     overview.margins(0.04)
     overview.set_title("overview (true scale)", fontsize=10, loc="left")
@@ -254,10 +265,11 @@ def main() -> None:
 
     # --- time-series strips with a moving cursor ---
     sp.plot(t, d["v_ego_mps"], color="tab:blue", label="ego")
-    sp.plot(t, d["v_lead_mps"], color=LEAD_COLOR, ls="--", label="lead")
+    if has_lead:
+        sp.plot(t, d["v_lead_mps"], color=LEAD_COLOR, ls="--", label="lead")
+        gp.plot(t, bumper_gap, color="black", label="bumper gap")
     sp.set_ylabel("speed [m/s]", fontsize=9)
     sp.set_title("ACC mode shaded in the background", fontsize=10, loc="left")
-    gp.plot(t, bumper_gap, color="black", label="bumper gap")
     gp.plot(t, d["d_des_m"] - VEH_FRONT_M, color="0.4", ls=":", label="desired")
     gp.axhline(0, color="tab:red", lw=0.8)
     gp.set_ylabel("gap [m]", fontsize=9)
@@ -310,11 +322,16 @@ def main() -> None:
 
         badge.set_text(f" t = {t[i]:5.2f} s   ACC {MODE_NAMES.get(m, m)} ")
         badge.set_backgroundcolor(MODE_COLORS.get(m, "gray"))
+        lead_txt = (
+            f"lead  {d['v_lead_mps'][i]:5.1f} m/s   {lead_offset[i]:+5.2f} m offset\n"
+            f"gap   {bumper_gap[i]:5.1f} m (bumper to bumper)\n"
+            if has_lead
+            else "lead  none\n"
+        )
         hud.set_text(
             f"ego   {d['v_ego_mps'][i]:5.1f} m/s   {d['a_ego_mps2'][i]:+5.2f} m/s²\n"
-            f"lead  {d['v_lead_mps'][i]:5.1f} m/s\n"
-            f"gap   {bumper_gap[i]:5.1f} m (bumper to bumper)\n"
-            f"e_y   {d['e_y_true_m'][i]:+5.2f} m (lane-center offset)"
+            + lead_txt
+            + f"e_y   {d['e_y_true_m'][i]:+5.2f} m (lane-center offset)"
         )
         for cur in cursors:
             cur.set_xdata([t[i], t[i]])

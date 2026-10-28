@@ -25,6 +25,11 @@ typedef struct {
   float kappa_1pm;  /**< lane curvature (left +)                  */
 } LaneEstimate;
 
+/** Lateral position y_c(x) of the lane center line at forward distance x. */
+static inline float lane_center_y(const LaneEstimate *lane, float x) {
+  return lane->c0 + lane->c1 * x + lane->c2 * x * x;
+}
+
 /** Camera-only range estimate for one 2D detection (output of MonoDepthNet). */
 typedef struct {
   float range_m;   /**< forward distance to the object's rear face */
