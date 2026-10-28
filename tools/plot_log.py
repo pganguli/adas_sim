@@ -16,13 +16,13 @@ import matplotlib.pyplot as plt
 MODE_NAMES = {0: "OFF", 1: "CRUISE", 2: "FOLLOW", 3: "EBRAKE"}
 
 
-def load(path):
+def load(path: str) -> dict[str, list[float]]:
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     return {k: [float(r[k]) for r in rows] for k in rows[0]}
 
 
-def main():
+def main() -> None:
     log_path = sys.argv[1] if len(sys.argv) > 1 else "out/log.csv"
     pdf_path = sys.argv[2] if len(sys.argv) > 2 else "out/plot.pdf"
     d = load(log_path)
