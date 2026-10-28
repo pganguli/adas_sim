@@ -1,0 +1,5 @@
+# Flags come from compile_commands.json (generate it with
+# `make compile_commands.json`; it is git-ignored because it holds absolute
+# paths). It lists every source and header, so clangd needs no extra flags.
+CompileFlags:
+  CompilationDatabase: .

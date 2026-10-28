@@ -1,0 +1,25 @@
+# Used by `make lint`. Start broad, then switch off checks that are noise for
+# this code base (numeric-heavy C with intentional literals and printf output).
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -misc-no-recursion,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-math-missing-parentheses,
+  -readability-uppercase-literal-suffix
+# cert-err33-c is off because I/O errors are surfaced through ferror/fclose in
+# the logger; the console printf calls are intentionally unchecked.
+HeaderFilterRegex: '(include|config|tests)/'
+WarningsAsErrors: ''

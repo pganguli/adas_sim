@@ -1,0 +1,17 @@
+# Matches the existing code style (LLVM, 2-space indent, 80 columns).
+# Comments are never reflowed: the formatter used to re-wrap doc blocks and
+# trailing comments, which scrambled aligned tables and ASCII diagrams.
+BasedOnStyle: LLVM
+IndentWidth: 2
+ColumnLimit: 80
+ReflowComments: Never
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 0
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*>'
+    Priority: 1
+  - Regex: '^".*"'
+    Priority: 2
