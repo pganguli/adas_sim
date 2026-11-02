@@ -30,10 +30,10 @@ static void record_d(void *ctx) {
 void test_scheduler(void) {
   /* Diamond: A -> {B, C} -> D */
   const TaskNode diamond[4] = {
-      {"A", record_a, 0, {0}, 1.0f},
-      {"B", record_b, 1, {0}, 2.0f},
-      {"C", record_c, 1, {0}, 3.0f},
-      {"D", record_d, 2, {1, 2}, 1.0f},
+      {"A", record_a, 0, {0}, 1.0f, NULL},
+      {"B", record_b, 1, {0}, 2.0f, NULL},
+      {"C", record_c, 1, {0}, 3.0f, NULL},
+      {"D", record_d, 2, {1, 2}, 1.0f, NULL},
   };
   Scheduler s;
   SchedulerStats stats;
@@ -53,12 +53,12 @@ void test_scheduler(void) {
 
   /* Invalid graphs are rejected (the scheduler reports them on stderr). */
   const TaskNode cycle[2] = {
-      {"X", record_a, 1, {1}, 1.0f},
-      {"Y", record_b, 1, {0}, 1.0f},
+      {"X", record_a, 1, {1}, 1.0f, NULL},
+      {"Y", record_b, 1, {0}, 1.0f, NULL},
   };
-  const TaskNode self_dep[1] = {{"S", record_a, 1, {0}, 1.0f}};
-  const TaskNode bad_dep[1] = {{"B", record_a, 1, {5}, 1.0f}};
-  const TaskNode no_fn[1] = {{"N", NULL, 0, {0}, 1.0f}};
+  const TaskNode self_dep[1] = {{"S", record_a, 1, {0}, 1.0f, NULL}};
+  const TaskNode bad_dep[1] = {{"B", record_a, 1, {5}, 1.0f, NULL}};
+  const TaskNode no_fn[1] = {{"N", NULL, 0, {0}, 1.0f, NULL}};
   CHECK(scheduler_init(&s, cycle, 2) == -1);
   CHECK(scheduler_init(&s, self_dep, 1) == -1);
   CHECK(scheduler_init(&s, bad_dep, 1) == -1);

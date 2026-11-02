@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "common/math_utils.h"
+#include "nn/dynamic.h"
 #include "nn/nn.h"
 #include "params.h"
 #include "types/perception_types.h"
@@ -64,17 +65,9 @@ static void suppress_box(VehicleDetector2D *net, const BBox2D *b) {
   }
 }
 
-void vehicle_detector_2d_infer(VehicleDetector2D *net, const DenoisedImage *in,
-                               Detections2D *out) {
-  /* ---- Backbone + head ---- */
-  const ConstTensor x = const_tensor_make(1, CAM_H, CAM_W, &in->px[0][0]);
-  Tensor f = tensor_make(1, CAM_H, CAM_W, &net->feat[0][0]);
-  Tensor h = tensor_make(1, CAM_H, CAM_W, &net->heat[0][0]);
-  nn_conv2d(&net->conv1, &x, &f);
-  const ConstTensor fc = tensor_as_const(&f);
-  nn_conv2d(&net->conv2, &fc, &h);
-
-  /* ---- Decode: peak -> box -> suppress, repeat ---- */
+/** Peak -> box -> suppress decode of net->heat into `out`. */
+static void decode(VehicleDetector2D *net, const DenoisedImage *in,
+                   Detections2D *out) {
   out->hdr = in->hdr;
   out->n = 0;
   memset(net->suppressed, 0, sizeof(net->suppressed));
@@ -102,4 +95,56 @@ void vehicle_detector_2d_infer(VehicleDetector2D *net, const DenoisedImage *in,
       out->boxes[out->n++] = box;
     }
   }
+}
+
+void vehicle_detector_2d_infer(VehicleDetector2D *net, const DenoisedImage *in,
+                               Detections2D *out) {
+  /* ---- Backbone + head ---- */
+  const ConstTensor x = const_tensor_make(1, CAM_H, CAM_W, &in->px[0][0]);
+  Tensor f = tensor_make(1, CAM_H, CAM_W, &net->feat[0][0]);
+  Tensor h = tensor_make(1, CAM_H, CAM_W, &net->heat[0][0]);
+  nn_conv2d(&net->conv1, &x, &f);
+  const ConstTensor fc = tensor_as_const(&f);
+  nn_conv2d(&net->conv2, &fc, &h);
+
+  decode(net, in, out);
+}
+
+float vehicle_detector_2d_infer_dynamic(VehicleDetector2D *net,
+                                        const DenoisedImage *in,
+                                        Detections2D *out, float quality) {
+  const ConstTensor x = const_tensor_make(1, CAM_H, CAM_W, &in->px[0][0]);
+  Tensor f = tensor_make(1, CAM_H, CAM_W, &net->feat[0][0]);
+  Tensor h = tensor_make(1, CAM_H, CAM_W, &net->heat[0][0]);
+
+  long macs = nn_conv2d_roi(&net->conv1, &x, &f, 0, CAM_H, NULL);
+
+  /* Early-exit gate network on the darkness feature: MaxPool3x3 (is any
+   * pixel of the heat conv's receptive field dark?) -> Conv1x1 ReLU(x - level).
+   * Output 0 = exit. heat doubles as the pool's scratch, it is refilled below. */
+  const float gate_w[1] = {1.0f};
+  const float gate_b[1] = {-(1.0f - dyn_clamp_quality(quality)) *
+                           DET2D_EXIT_DARKNESS_MAX};
+  const Conv2dLayer gate = {1, 1, 1, gate_w, gate_b, ACT_RELU, PAD_ZERO};
+  Tensor g = tensor_make(1, CAM_H, CAM_W, &net->gate[0][0]);
+  const ConstTensor fin = tensor_as_const(&f);
+  nn_maxpool2d(&fin, &h, 3);
+  const ConstTensor pooled = tensor_as_const(&h);
+  macs += nn_conv2d_roi(&gate, &pooled, &g, 0, CAM_H, NULL);
+  const ConstTensor gin = tensor_as_const(&g);
+  nn_exit_mask(&gin, &net->exited[0][0]);
+
+  /* Exited pixels get the conv's bias response, the exact value for an
+   * all-zero neighborhood. */
+  const float idle = nn_activate(net->conv2.act, net->conv2.bias[0]);
+  for (int v = 0; v < CAM_H; ++v) {
+    for (int u = 0; u < CAM_W; ++u) {
+      net->heat[v][u] = idle;
+    }
+  }
+  macs += nn_conv2d_roi(&net->conv2, &fin, &h, 0, CAM_H, &net->exited[0][0]);
+
+  decode(net, in, out);
+  return dyn_cost(macs, nn_conv2d_macs(&net->conv1, CAM_H, CAM_W) +
+                            nn_conv2d_macs(&net->conv2, CAM_H, CAM_W));
 }

@@ -25,6 +25,7 @@ int main(void) {
   run_group("plan_delay", test_plan_delay);
   run_group("world", test_world);
   run_group("metrics", test_metrics);
+  run_group("dynamic DNNs", test_dynamic);
   run_group("scenarios (integration)", test_scenario);
 
   printf("%d checks, %d failed\n", g_test_checks, g_test_failures);

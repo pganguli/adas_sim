@@ -14,9 +14,13 @@
 #ifndef ADAS_PIPELINE_H
 #define ADAS_PIPELINE_H
 
+#include <stdbool.h>
+#include <stdio.h>
+
 #include "estimation/lane_geometry_net.h"
 #include "estimation/lead_fusion.h"
 #include "estimation/mono_depth_net.h"
+#include "nn/dynamic.h"
 #include "perception/image_denoise_net.h"
 #include "perception/lane_seg_net.h"
 #include "perception/point_filter_net.h"
@@ -63,6 +67,12 @@ typedef struct {
   AccOutput acc;
   LateralRef lat_ref;
   PlanOutput plan;
+  /* dynamic DNNs: per-node selection (written by whoever controls quality,
+   * e.g. a controller; initialized from params.h) and the MACs the node
+   * executed in its last run relative to the static net (1 for static
+   * nodes and non-DNNs; may exceed 1 when gate overhead dominates) */
+  DnnConfig dnn[NODE_COUNT];
+  float cost[NODE_COUNT];
 } PipelineData;
 
 /** Stateful algorithm instances (networks, filters, state machines). */
@@ -89,6 +99,18 @@ typedef struct {
 
 /** Initialize all modules and build the DAG. Returns 0 on success. */
 int adas_pipeline_init(AdasPipeline *p);
+
+/** Display name of node `node` (a PipelineNodeId). */
+const char *adas_pipeline_node_name(int node);
+
+/** True for the DNN nodes (those with a static and a dynamic variant). */
+bool adas_pipeline_is_dnn(int node);
+
+/** Quality node `node` runs with: its quality if dynamic, 1 if static. */
+float adas_pipeline_quality(const AdasPipeline *p, int node);
+
+/** Print the variant (and quality) each DNN node runs with to `fp`. */
+void adas_pipeline_print_dnn(const AdasPipeline *p, FILE *fp);
 
 /** Run one pipeline tick on a new sensor frame. Result in p->data.plan. */
 void adas_pipeline_run(AdasPipeline *p, const SensorFrame *sensors,

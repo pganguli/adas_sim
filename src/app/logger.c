@@ -33,7 +33,14 @@ int logger_open(Logger *log, const char *path) {
                    "camera_used,latency_ms,delay_ms,lead_y_true_m,"
                    /* scene: enough ground truth to redraw the run */
                    "ego_s_m,lead_present,lead_s_m,lead_offset_m,"
-                   "road_straight_m,road_radius_m,lane_width_m\n");
+                   "road_straight_m,road_radius_m,lane_width_m");
+  for (int i = 0; i < NODE_COUNT; ++i) {
+    if (adas_pipeline_is_dnn(i)) {
+      const char *name = adas_pipeline_node_name(i);
+      fprintf(log->fp, ",q_%s,cost_%s", name, name);
+    }
+  }
+  fprintf(log->fp, "\n");
   return 0;
 }
 
@@ -63,10 +70,17 @@ void logger_write(Logger *log, const WorldState *w, const GroundTruth *gt,
           D(p->stats.makespan_ms), D(delay_ms), D(gt->lead_y_m));
 
   const Vec2 ego_xy = {w->ego.pose.x, w->ego.pose.y};
-  fprintf(log->fp, "%.3f,%d,%.3f,%.3f,%.1f,%.1f,%.2f\n",
+  fprintf(log->fp, "%.3f,%d,%.3f,%.3f,%.1f,%.1f,%.2f",
           D(road_project(&w->road, ego_xy).s_m), (int)w->lead.present,
           D(w->lead.s_m), D(w->lead.offset_m), D(w->road.straight_len_m),
           D(w->road.radius_m), D(w->road.lane_width_m));
+  for (int i = 0; i < NODE_COUNT; ++i) {
+    if (adas_pipeline_is_dnn(i)) {
+      fprintf(log->fp, ",%.3f,%.4f", D(adas_pipeline_quality(p, i)),
+              D(d->cost[i]));
+    }
+  }
+  fprintf(log->fp, "\n");
 }
 
 int logger_close(Logger *log) {

@@ -10,7 +10,8 @@
  * are reproducible) and simulates parallel timing: every node starts when its
  * slowest dependency finishes and takes its nominal latency_ms. This yields
  * the end-to-end latency of the parallel pipeline (critical path) next to the
- * time a purely serial execution would take.
+ * time a purely serial execution would take. A node with a cost function
+ * takes latency_ms * cost(ctx, node) instead.
  *
  * The scheduler knows nothing about ADAS; it only calls fn(ctx).
  */
@@ -27,13 +28,21 @@
 /** Work function of a node; receives the user context given to scheduler_run. */
 typedef void (*NodeFn)(void *ctx);
 
+/**
+ * Optional per-node cost query, called right after the node's fn ran:
+ * returns the factor (>= 0) applied to the nominal latency of node `node`.
+ * Lets dynamic nodes report the work they actually did.
+ */
+typedef float (*NodeCostFn)(void *ctx, int node);
+
 /** One node of the task graph. */
 typedef struct {
   const char *name;         /**< display name                */
   NodeFn fn;                /**< work function               */
   int n_deps;               /**< number of valid deps        */
   int deps[SCHED_MAX_DEPS]; /**< indices into the node table */
-  float latency_ms;         /**< nominal execution time      */
+  float latency_ms;         /**< nominal (full) execution time */
+  NodeCostFn cost;          /**< latency factor, NULL = 1    */
 } TaskNode;
 
 /** A validated, topologically sorted task graph. */

@@ -4,7 +4,9 @@
  *
  * The last columns describe the scene (road geometry, ego and lead position
  * along the road, lead lateral offset) so tools/playback_log.py can redraw
- * any scenario without knowing its definition.
+ * any scenario without knowing its definition. After them, every DNN node
+ * gets two columns: q_<node> (quality it ran with, 1 if static) and
+ * cost_<node> (executed MACs relative to the static net).
  */
 #ifndef ADAS_LOGGER_H
 #define ADAS_LOGGER_H

@@ -82,9 +82,11 @@ void scheduler_run(const Scheduler *s, void *ctx, SchedulerStats *stats) {
 
     node->fn(ctx);
 
+    const float latency_ms =
+        node->latency_ms * ((node->cost != NULL) ? node->cost(ctx, i) : 1.0f);
     stats->start_ms[i] = start;
-    stats->finish_ms[i] = start + node->latency_ms;
-    stats->serial_ms += node->latency_ms;
+    stats->finish_ms[i] = start + latency_ms;
+    stats->serial_ms += latency_ms;
     stats->makespan_ms = fmaxf(stats->makespan_ms, stats->finish_ms[i]);
   }
 }

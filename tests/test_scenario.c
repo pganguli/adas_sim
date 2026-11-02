@@ -6,7 +6,9 @@
 
 #include "app/metrics.h"
 #include "app/sim_runner.h"
+#include "nn/dynamic.h"
 #include "params.h"
+#include "pipeline/adas_pipeline.h"
 #include "sim/scenario.h"
 #include "test_util.h"
 #include "types/planning_types.h"
@@ -14,7 +16,7 @@
 /** Detailed checks on the default (reference) scenario. */
 static void test_highway_stop_and_go(void) {
   const ScenarioConfig *sc = scenario_get_by_id(SCENARIO_HIGHWAY_STOP_AND_GO);
-  const SimOptions quiet = {NULL, NULL};
+  const SimOptions quiet = {NULL, NULL, NULL};
   RunMetrics a;
   RunMetrics b;
 
@@ -38,15 +40,19 @@ static void test_highway_stop_and_go(void) {
   CHECK(a.mode_ticks[LON_MODE_EMERGENCY_BRAKE] > 0);
 
   /* Pipeline parallelism pays off. */
-  CHECK(a.makespan_ms < a.serial_ms);
+  CHECK(tick_stat_mean(&a.makespan_ms, a.n_ticks) <
+        tick_stat_mean(&a.serial_ms, a.n_ticks));
+  CHECK(a.makespan_ms.max < a.serial_ms.min);
 
-  /* The injected delay is the latency rounded up to whole sim steps. */
-  const float step_ms = SIM_DT_MS;
-  const float latency_ms =
-      LATENCY_INJECTION ? SENSOR_LATENCY_MS + a.makespan_ms : 0.0f;
-  CHECK(a.plan_delay_ms >= latency_ms - 1e-3f);
-  CHECK(a.plan_delay_ms < latency_ms + step_ms);
-  CHECK_NEAR(fmodf(a.plan_delay_ms, step_ms), 0.0f, 1e-3);
+  /* The injected delay is the latency itself, not rounded to sim steps. */
+  if (LATENCY_INJECTION) {
+    CHECK_NEAR(a.plan_delay_ms.min, SENSOR_LATENCY_MS + a.makespan_ms.min,
+               1e-4);
+    CHECK_NEAR(a.plan_delay_ms.max, SENSOR_LATENCY_MS + a.makespan_ms.max,
+               1e-4);
+  } else {
+    CHECK(a.plan_delay_ms.max == 0.0f);
+  }
 
   /* Determinism: a second run reproduces the first bit for bit. */
   CHECK(sim_run(sc, &quiet, &b) == 0);
@@ -58,7 +64,7 @@ static void test_highway_stop_and_go(void) {
 
 /** Every scenario runs to completion safely and hits its intended mode. */
 static void test_all_scenarios(void) {
-  const SimOptions quiet = {NULL, NULL};
+  const SimOptions quiet = {NULL, NULL, NULL};
   RunMetrics m[SCENARIO_COUNT];
 
   CHECK(scenario_get_by_id(SCENARIO_COUNT) == NULL);
@@ -96,7 +102,52 @@ static void test_all_scenarios(void) {
   CHECK(hard_brake->min_bumper_gap_m > 0.0f);
 }
 
+/** Run the reference scenario with every DNN set to `variant` at `quality`. */
+static void run_variant(DnnVariant variant, float quality, RunMetrics *m) {
+  DnnConfig dnn[NODE_COUNT];
+  for (int i = 0; i < NODE_COUNT; ++i) {
+    dnn[i].variant = variant;
+    dnn[i].quality = quality;
+  }
+  const SimOptions opt = {NULL, NULL, dnn};
+  CHECK(sim_run(scenario_get_by_id(SCENARIO_HIGHWAY_STOP_AND_GO), &opt, m) ==
+        0);
+}
+
+/** Static and dynamic DNNs both drive the loop; dynamic ones cut the delay. */
+static void test_static_vs_dynamic(void) {
+  RunMetrics st;
+  RunMetrics dy;
+  run_variant(DNN_STATIC, 1.0f, &st);
+  run_variant(DNN_DYNAMIC, 0.75f, &dy);
+
+  const RunMetrics *runs[2] = {&st, &dy};
+  for (int i = 0; i < 2; ++i) {
+    const RunMetrics *m = runs[i];
+    CHECK(!m->collision);
+    CHECK(m->min_bumper_gap_m > 2.0f);
+    CHECK((double)m->n_lane_valid / m->n_ticks > 0.99);
+    CHECK(sqrt(m->sq_err_e_y / m->n_lane_valid) < 0.1);
+    CHECK(sqrt(m->sq_err_gap / m->n_lead_valid) < 0.25);
+  }
+  /* The shorter pipeline latency reaches the controllers (it is not
+   * swallowed by rounding to sim steps), so the closed loop differs. */
+  CHECK(dy.makespan_ms.max < st.makespan_ms.min);
+  CHECK(dy.plan_delay_ms.max < st.plan_delay_ms.min);
+  for (int i = 0; i < NODE_COUNT; ++i) {
+    if (!adas_pipeline_is_dnn(i)) {
+      continue;
+    }
+    /* Static nets always run in full; the dynamic run records its quality. */
+    CHECK(st.dynamic_ticks[i] == 0 && dy.dynamic_ticks[i] == dy.n_ticks);
+    CHECK(st.cost[i].min == 1.0f && st.cost[i].max == 1.0f);
+    CHECK_NEAR(tick_stat_mean(&dy.quality[i], dy.n_ticks), 0.75f, 1e-6);
+  }
+  CHECK(dy.sq_err_e_y_true != st.sq_err_e_y_true);
+}
+
 void test_scenario(void) {
   test_highway_stop_and_go();
+  test_static_vs_dynamic();
   test_all_scenarios();
 }

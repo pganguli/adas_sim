@@ -30,7 +30,7 @@ int main(void) {
     return 1;
   }
 
-  const SimOptions opt = {log_path, stdout};
+  const SimOptions opt = {log_path, stdout, NULL};
   if (sim_run(sc, &opt, &metrics) != 0) {
     return 1;
   }

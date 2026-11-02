@@ -125,6 +125,30 @@
 #define DET3D_MIN_POINTS 5
 
 /* ======================================================================== */
+/* Dynamic DNNs                                                             */
+/* ======================================================================== */
+/* Every DNN has a static variant (full network) and, alongside it, a
+ * dynamic one that trades accuracy for latency through a quality input in
+ * (0, 1]: 1 = full accuracy, -> 0 = as little work as possible.
+ * Pick the variant per DNN (DNN_STATIC or DNN_DYNAMIC); the quality is the
+ * initial value of PipelineData.dnn[node].quality, which the controller is
+ * meant to overwrite at runtime.                                           */
+#define DNN_QUALITY_DEFAULT 0.75f
+#define DNN_VARIANT_IMAGE_DENOISE DNN_DYNAMIC
+#define DNN_VARIANT_LANE_SEG DNN_DYNAMIC
+#define DNN_VARIANT_VEHICLE_DET_2D DNN_DYNAMIC
+#define DNN_VARIANT_POINT_FILTER DNN_DYNAMIC
+#define DNN_VARIANT_VEHICLE_DET_3D DNN_DYNAMIC
+#define DNN_VARIANT_LANE_GEOMETRY DNN_DYNAMIC
+#define DNN_VARIANT_MONO_DEPTH DNN_DYNAMIC
+/* Early-exit gates, scaled by (1 - quality): */
+/* LaneSegNet skips the ridge channel of pixels darker than (1-q) * this.   */
+#define LANESEG_EXIT_LEVEL_MAX 2.0f
+/* VehicleDetector2D skips the heat-map conv where the 3x3 neighborhood is
+ * not darker than (1-q) * this.                                            */
+#define DET2D_EXIT_DARKNESS_MAX 0.6f
+
+/* ======================================================================== */
 /* State estimation                                                         */
 /* ======================================================================== */
 /* LaneGeometryNet: row anchors (image rows) used to sample the lane mask. */

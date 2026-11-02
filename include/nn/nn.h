@@ -93,8 +93,40 @@ float nn_activate(Activation act, float x);
  */
 void nn_conv2d(const Conv2dLayer *layer, const ConstTensor *in, Tensor *out);
 
+/**
+ * Partial convolution for dynamic networks: only output rows
+ * [y_begin, y_end) are computed, and within them every pixel whose `skip`
+ * entry (h * w bytes, one per pixel, shared by all channels) is nonzero is
+ * left untouched. `skip` may be NULL. Pixels that are not computed keep
+ * whatever the caller pre-filled them with. Returns the number of
+ * multiply-accumulates executed (padding taps count, so the full layer costs
+ * nn_conv2d_macs()).
+ */
+long nn_conv2d_roi(const Conv2dLayer *layer, const ConstTensor *in, Tensor *out,
+                   int y_begin, int y_end, const uint8_t *skip);
+
+/**
+ * k x k max-pool, stride 1, "same" size (k odd, outside pixels ignored),
+ * applied per channel. `in` and `out` must have the same shape.
+ */
+void nn_maxpool2d(const ConstTensor *in, Tensor *out, int k);
+
+/**
+ * Early-exit decision from a gate network's output (a ReLU-ed map):
+ * skip[i] = 1 where the gate is 0, i.e. the pixel exits.
+ */
+void nn_exit_mask(const ConstTensor *gate, uint8_t *skip);
+
+/** Multiply-accumulates of one full convolution over an h x w input. */
+long nn_conv2d_macs(const Conv2dLayer *layer, int h, int w);
+
 /** out[out_dim] = act(W * in[in_dim] + b). */
 void nn_dense(const DenseLayer *layer, const float *in, float *out);
+
+/** Multiply-accumulates of one dense layer evaluation. */
+static inline long nn_dense_macs(const DenseLayer *layer) {
+  return (long)layer->in_dim * layer->out_dim;
+}
 
 /**
  * Index of the first maximum of data[0..n) among entries with mask[i] == 0

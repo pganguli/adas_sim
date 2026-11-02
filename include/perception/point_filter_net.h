@@ -9,6 +9,11 @@
  *
  * The weights encode "keep points between PFILTER_Z_MIN and PFILTER_Z_MAX
  * above the road", i.e. ground removal + height band filtering.
+ *
+ * Dynamic variant: hidden units are pruned to ceil(quality * 2) (the ground
+ * test h0 is kept first, the height-band test h1 is the one dropped), and
+ * every point exits right after h0 if it is below the ground band, which
+ * cannot change the result.
  */
 #ifndef ADAS_POINT_FILTER_NET_H
 #define ADAS_POINT_FILTER_NET_H
@@ -28,5 +33,9 @@ void point_filter_net_init(PointFilterNet *net);
 /** Keep only the points the MLP classifies as in-band. */
 void point_filter_net_infer(PointFilterNet *net, const LidarScan *in,
                             FilteredPointCloud *out);
+
+/** Pruned + early-exit variant; returns the executed MACs relative to the static net. */
+float point_filter_net_infer_dynamic(PointFilterNet *net, const LidarScan *in,
+                                     FilteredPointCloud *out, float quality);
 
 #endif /* ADAS_POINT_FILTER_NET_H */

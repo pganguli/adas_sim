@@ -11,16 +11,19 @@
  *   lateral control (Stanley)    logging / metrics
  *   plant + world update
  *
- * Each plan enters a delay line and reaches the controllers
+ * Each plan enters a delay line and reaches the controllers exactly
  * SENSOR_LATENCY_MS + the pipeline's critical-path latency after its sensor
- * capture (rounded up to whole steps). The controllers hold the newest
- * released plan (zero-order hold).
+ * capture. Plan arrival is an event: when a plan arrives inside a step, the
+ * plant is integrated up to the arrival time with the old command, and the
+ * controllers recompute the command with the new plan for the rest of the
+ * step. So latency changes smaller than SIM_DT_S still reach the plant. The
+ * controllers hold the newest released plan (zero-order hold).
  */
 #include "app/sim_runner.h"
 
-#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "app/logger.h"
 #include "app/metrics.h"
@@ -38,6 +41,7 @@
 #include "sim/vehicle_model.h"
 #include "sim/world.h"
 #include "types/control_types.h"
+#include "types/planning_types.h"
 #include "types/sensor_types.h"
 #include "types/world_types.h"
 
@@ -45,10 +49,24 @@
 static AdasPipeline g_pipeline;
 static SensorFrame g_sensors;
 
-/** Sim steps from sensor capture to plan release (latency rounded up). */
-static int latency_steps(float latency_ms) {
-  /* The tolerance keeps exact multiples of the step from rounding up. */
-  return (int)ceilf(latency_ms / SIM_DT_MS - 1e-4f);
+/** Plan arrivals closer than this to a segment start are applied there
+ *  (avoids sub-microsecond plant segments). */
+#define PLAN_ARRIVAL_EPS_S 1e-6
+
+/** Start time of sim step `step` (world.t_s also accumulates float steps). */
+static double step_time_s(int step) { return (double)step * (double)SIM_DT_S; }
+
+/**
+ * Low-level control + plant over one segment [t, t + dt) of a sim step:
+ * the controllers compute a command from `plan` and the plant integrates it.
+ */
+static void control_and_step(WorldState *world, const ScenarioConfig *sc,
+                             LongitudinalController *lon_ctrl,
+                             const PlanOutput *plan, const EgoMotion *ego_meas,
+                             float dt, ActuatorCmd *cmd) {
+  longitudinal_controller_step(lon_ctrl, plan->a_des_mps2, ego_meas, dt, cmd);
+  lateral_controller_step(&plan->lat, ego_meas->v_mps, cmd);
+  world_step(world, sc, cmd, dt);
 }
 
 /** Print one console status line (ground truth next to estimates). */
@@ -89,6 +107,9 @@ int sim_run(const ScenarioConfig *sc, const SimOptions *opt,
     fprintf(stderr, "pipeline init failed\n");
     return 1;
   }
+  if (opt->dnn != NULL) {
+    memcpy(g_pipeline.data.dnn, opt->dnn, sizeof(g_pipeline.data.dnn));
+  }
   if (opt->log_path != NULL && logger_open(&logger, opt->log_path) != 0) {
     return 1;
   }
@@ -97,6 +118,7 @@ int sim_run(const ScenarioConfig *sc, const SimOptions *opt,
     fprintf(opt->console, "Scenario: %s (%.0f s)\n", sc->name,
             (double)sc->duration_s);
     scheduler_print(&g_pipeline.sched, opt->console);
+    adas_pipeline_print_dnn(&g_pipeline, opt->console);
     fprintf(opt->console, "\n");
   }
 
@@ -121,9 +143,9 @@ int sim_run(const ScenarioConfig *sc, const SimOptions *opt,
       const float latency_ms =
           LATENCY_INJECTION ? SENSOR_LATENCY_MS + g_pipeline.stats.makespan_ms
                             : 0.0f;
-      const int delay_steps = latency_steps(latency_ms);
-      const float delay_ms = (float)delay_steps * SIM_DT_MS;
-      plan_delay_push(&plan_delay, &g_pipeline.data.plan, step + delay_steps);
+      const float delay_ms = latency_ms;
+      plan_delay_push(&plan_delay, &g_pipeline.data.plan,
+                      step_time_s(step) + 1e-3 * (double)delay_ms);
 
       const GroundTruth gt = world_ground_truth(&world);
       logger_write(&logger, &world, &gt, &g_pipeline, &cmd, delay_ms);
@@ -141,12 +163,23 @@ int sim_run(const ScenarioConfig *sc, const SimOptions *opt,
       }
     }
 
-    /* 100 Hz: low-level control -> actuators -> plant */
-    const PlanOutput *plan = plan_delay_poll(&plan_delay, step);
-    longitudinal_controller_step(&lon_ctrl, plan->a_des_mps2, &ego_meas,
-                                 SIM_DT_S, &cmd);
-    lateral_controller_step(&plan->lat, ego_meas.v_mps, &cmd);
-    world_step(&world, sc, &cmd, SIM_DT_S);
+    /* 100 Hz: low-level control -> actuators -> plant, split at every plan
+     * arrival inside the step. */
+    const double t_end = step_time_s(step + 1);
+    double t = step_time_s(step);
+    const PlanOutput *plan = plan_delay_poll(&plan_delay, t);
+    double due = 0.0;
+    while (plan_delay_next_due(&plan_delay, &due) &&
+           due < t_end - PLAN_ARRIVAL_EPS_S) {
+      if (due > t + PLAN_ARRIVAL_EPS_S) {
+        control_and_step(&world, sc, &lon_ctrl, plan, &ego_meas,
+                         (float)(due - t), &cmd);
+        t = due;
+      }
+      plan = plan_delay_poll(&plan_delay, due);
+    }
+    control_and_step(&world, sc, &lon_ctrl, plan, &ego_meas, (float)(t_end - t),
+                     &cmd);
   }
 
   return (logger_close(&logger) != 0) ? 1 : 0;

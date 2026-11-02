@@ -12,12 +12,16 @@
 #include <stdio.h>
 
 #include "app/metrics.h"
+#include "nn/dynamic.h"
 #include "sim/scenario.h"
 
-/** Output options of a run. */
+/** Options of a run. */
 typedef struct {
   const char *log_path; /**< CSV log file, or NULL for no log      */
   FILE *console;        /**< status lines go here, or NULL (quiet) */
+  /** Per-node DNN selection (NODE_COUNT entries, indexed by
+   *  PipelineNodeId), or NULL for the params.h defaults. */
+  const DnnConfig *dnn;
 } SimOptions;
 
 /**

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "common/camera_geometry.h"
+#include "nn/dynamic.h"
 #include "nn/nn.h"
 #include "params.h"
 #include "types/estimation_types.h"
@@ -35,45 +36,75 @@ static bool invert_3x3(float m[3][3], float inv[3][3]) {
   return true;
 }
 
-void lane_geometry_net_init(LaneGeometryNet *net) {
-  static const int rows[LANE_N_ANCHORS] = LANE_ANCHOR_ROWS;
+/** Anchors in the order they are kept when pruning (indices into rows). */
+static const int k_priority[LANE_N_ANCHORS] = {5, 0, 3, 2, 4, 1};
+/** Fewest anchors that still determine the quadratic. */
+#define LANE_MIN_ANCHORS 3
+
+/**
+ * Least-squares head over the anchors flagged in `use` (k of them, in index
+ * order): w[3][k] = (A^T A)^-1 A^T. Returns false if degenerate.
+ */
+static bool fit_head(const float *range_m, const bool *use, int k, float *w) {
   float A[LANE_N_ANCHORS][3];
   float AtA[3][3] = {{0}};
   float AtA_inv[3][3];
+  int n = 0;
+
+  /* Design matrix A: one row [1, X, X^2] per used anchor. */
+  for (int i = 0; i < LANE_N_ANCHORS; ++i) {
+    if (use[i]) {
+      const float X = range_m[i];
+      A[n][0] = 1.0f;
+      A[n][1] = X;
+      A[n][2] = X * X;
+      n++;
+    }
+  }
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      for (int r = 0; r < k; ++r) {
+        AtA[i][j] += A[r][i] * A[r][j];
+      }
+    }
+  }
+  if (!invert_3x3(AtA, AtA_inv)) {
+    return false;
+  }
+  for (int i = 0; i < 3; ++i) {
+    for (int r = 0; r < k; ++r) {
+      float acc = 0.0f;
+      for (int j = 0; j < 3; ++j) {
+        acc += AtA_inv[i][j] * A[r][j];
+      }
+      w[i * k + r] = acc;
+    }
+  }
+  return true;
+}
+
+void lane_geometry_net_init(LaneGeometryNet *net) {
+  static const int rows[LANE_N_ANCHORS] = LANE_ANCHOR_ROWS;
+  bool all[LANE_N_ANCHORS];
 
   memset(net, 0, sizeof(*net));
   const DenseLayer head = {LANE_N_ANCHORS, 3, net->head_w, NULL, ACT_NONE};
   net->head = head;
 
-  /* Design matrix A: one row [1, X, X^2] per anchor. */
   for (int k = 0; k < LANE_N_ANCHORS; ++k) {
-    const float X = cam_row_to_range((float)rows[k] + 0.5f);
     net->anchor_row[k] = rows[k];
-    net->anchor_range_m[k] = X;
-    A[k][0] = 1.0f;
-    A[k][1] = X;
-    A[k][2] = X * X;
+    net->anchor_range_m[k] = cam_row_to_range((float)rows[k] + 0.5f);
+    all[k] = true;
   }
-  for (int i = 0; i < 3; ++i) {
-    for (int j = 0; j < 3; ++j) {
-      for (int k = 0; k < LANE_N_ANCHORS; ++k) {
-        AtA[i][j] += A[k][i] * A[k][j];
-      }
+  /* A degenerate anchor layout leaves its head unfitted (head_ok false). */
+  net->head_ok[LANE_N_ANCHORS] =
+      fit_head(net->anchor_range_m, all, LANE_N_ANCHORS, net->head_w);
+  for (int k = LANE_MIN_ANCHORS; k < LANE_N_ANCHORS; ++k) {
+    bool use[LANE_N_ANCHORS] = {false};
+    for (int i = 0; i < k; ++i) {
+      use[k_priority[i]] = true;
     }
-  }
-  if (!invert_3x3(AtA, AtA_inv)) {
-    return; /* degenerate anchor layout: head stays zero */
-  }
-
-  /* Head weights = pseudo-inverse (A^T A)^-1 A^T, shape 3 x K. */
-  for (int i = 0; i < 3; ++i) {
-    for (int k = 0; k < LANE_N_ANCHORS; ++k) {
-      float w = 0.0f;
-      for (int j = 0; j < 3; ++j) {
-        w += AtA_inv[i][j] * A[k][j];
-      }
-      net->head_w[i * LANE_N_ANCHORS + k] = w;
-    }
+    net->head_ok[k] = fit_head(net->anchor_range_m, use, k, net->head_k_w[k]);
   }
 }
 
@@ -96,17 +127,41 @@ static bool soft_argmax_row(const LaneMask *m, int v, int u0, int u1,
   return true;
 }
 
-void lane_geometry_net_infer(LaneGeometryNet *net, const LaneMask *in,
-                             LaneEstimate *out) {
+/** Anchors kept for a given count: the first n_use of k_priority. */
+static void select_anchors(int n_use, bool *use) {
+  for (int i = 0; i < LANE_N_ANCHORS; ++i) {
+    use[i] = false;
+  }
+  for (int i = 0; i < n_use; ++i) {
+    use[k_priority[i]] = true;
+  }
+}
+
+/** Estimate from the `n_use` highest-priority anchors (all = static net). */
+static void infer_anchors(LaneGeometryNet *net, int n_use, const LaneMask *in,
+                          LaneEstimate *out) {
   const float half_lane = 0.5f * LANE_WIDTH_NOMINAL_M;
+  const int max_imputed = (n_use - LANE_MIN_ANCHORS < LANE_MAX_IMPUTED_ROWS)
+                              ? n_use - LANE_MIN_ANCHORS
+                              : LANE_MAX_IMPUTED_ROWS;
+  bool use[LANE_N_ANCHORS];
   float center[LANE_N_ANCHORS];
   int n_missing = 0;
+  int n = 0;
 
   memset(out, 0, sizeof(*out));
   out->hdr = in->hdr;
+  if (!net->head_ok[n_use]) {
+    net->prev.valid = false;
+    return; /* no fitted head for this anchor set: out->valid stays false */
+  }
+  select_anchors(n_use, use);
 
   /* ---- Row-anchor features: lane-center lateral position per anchor ---- */
   for (int k = 0; k < LANE_N_ANCHORS; ++k) {
+    if (!use[k]) {
+      continue;
+    }
     const int v = net->anchor_row[k];
     const float X = net->anchor_range_m[k];
     float u_l = 0.0f;
@@ -115,28 +170,34 @@ void lane_geometry_net_infer(LaneGeometryNet *net, const LaneMask *in,
     const bool has_r = soft_argmax_row(in, v, CAM_W / 2, CAM_W, &u_r);
 
     if (has_l && has_r) {
-      center[k] =
+      center[n] =
           0.5f * (cam_col_to_lateral(u_l, X) + cam_col_to_lateral(u_r, X));
     } else if (has_l) {
-      center[k] = cam_col_to_lateral(u_l, X) - half_lane;
+      center[n] = cam_col_to_lateral(u_l, X) - half_lane;
     } else if (has_r) {
-      center[k] = cam_col_to_lateral(u_r, X) + half_lane;
+      center[n] = cam_col_to_lateral(u_r, X) + half_lane;
     } else if (net->prev.valid) {
-      center[k] = lane_center_y(&net->prev, X); /* impute from prior */
+      center[n] = lane_center_y(&net->prev, X); /* impute from prior */
       n_missing++;
     } else {
       n_missing = LANE_N_ANCHORS; /* no prior: give up */
       break;
     }
+    n++;
   }
-  if (n_missing > LANE_MAX_IMPUTED_ROWS) {
+  if (n_missing > max_imputed) {
     net->prev.valid = false;
     return; /* out->valid stays false */
   }
 
   /* ---- Regression head ---- */
+  DenseLayer head = net->head;
+  if (n_use < LANE_N_ANCHORS) {
+    head.in_dim = n_use;
+    head.weight = net->head_k_w[n_use];
+  }
   float coeff[3];
-  nn_dense(&net->head, center, coeff);
+  nn_dense(&head, center, coeff);
 
   out->valid = true;
   out->c0 = coeff[0];
@@ -146,4 +207,24 @@ void lane_geometry_net_infer(LaneGeometryNet *net, const LaneMask *in,
   out->e_psi_rad = -atanf(coeff[1]);
   out->kappa_1pm = 2.0f * coeff[2];
   net->prev = *out;
+}
+
+void lane_geometry_net_infer(LaneGeometryNet *net, const LaneMask *in,
+                             LaneEstimate *out) {
+  infer_anchors(net, LANE_N_ANCHORS, in, out);
+}
+
+float lane_geometry_net_infer_dynamic(LaneGeometryNet *net, const LaneMask *in,
+                                      LaneEstimate *out, float quality) {
+  int n_use = dyn_keep_count(quality, LANE_N_ANCHORS);
+  n_use = (n_use < LANE_MIN_ANCHORS) ? LANE_MIN_ANCHORS : n_use;
+  /* Degenerate subset: fall back to the next larger fitted one. */
+  while (n_use < LANE_N_ANCHORS && !net->head_ok[n_use]) {
+    n_use++;
+  }
+  infer_anchors(net, n_use, in, out);
+
+  /* Per anchor: two half-row soft-argmaxes (CAM_W taps) + 3 head MACs. */
+  const long per_anchor = CAM_W + 3;
+  return dyn_cost(n_use * per_anchor, LANE_N_ANCHORS * per_anchor);
 }

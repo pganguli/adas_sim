@@ -43,7 +43,7 @@ The stages are listed below in DAG order. The program prints the real stage list
 | 4 | `acc` | Spacing policy. |
 | 5 | `behavior_planner` | Arbitration: ACC + LKA → one plan. |
 
-Timing comes from a deterministic DAG scheduler. It executes nodes in topological order, which keeps runs reproducible, and simulates parallel timing: each node starts when its slowest dependency finishes. The run summary reports the critical-path latency next to the latency of a fully serial run (17 ms vs. 39 ms). The critical-path latency is also injected into the closed loop (see [Rates and latency](#rates-and-latency)).
+Timing comes from a deterministic DAG scheduler. It executes nodes in topological order, which keeps runs reproducible, and simulates parallel timing: each node starts when its slowest dependency finishes. The run summary reports the critical-path latency next to the latency of a fully serial run: 17 ms vs. 39 ms with static DNNs, 10.9 ms vs. 16.4 ms with the default dynamic DNNs at quality 0.75. The critical-path latency is also injected into the closed loop (see [Rates and latency](#rates-and-latency)).
 
 ### The DNNs (all in `src/perception` and `src/estimation`)
 
@@ -58,6 +58,24 @@ All networks are built from two layer types in `src/nn/nn.c` (`Conv2dLayer`, `De
 | `VehicleDetector3D` | BEV voxelization → Conv3×3, ReLU → peak decode → box fit | `Detections3D` |
 | `LaneGeometryNet` | Row-anchor soft-argmax features → Dense(6→3) head, with weights set to the LS pseudo-inverse | `LaneEstimate` (`e_y`, `e_psi`, `kappa`) |
 | `MonoDepthNet` | Box features [1/v_bottom, 1/h, 1/w] → Dense(3→3), ReLU → Dense(3→1) | `DepthEstimates` |
+
+### Dynamic DNNs (accuracy/latency trade-off)
+
+Each DNN has a static variant (`xxx_infer`, the full network) and, next to it, a dynamic one (`xxx_infer_dynamic(..., quality)`) with `quality` in (0, 1]: 1 = full accuracy, → 0 = as little work as possible. The variant per node is chosen in `config/params.h` (`DNN_VARIANT_*`: `DNN_STATIC` or `DNN_DYNAMIC`), and the quality starts at `DNN_QUALITY_DEFAULT` (0.75). Both live in `PipelineData.dnn[node]`, so a controller can overwrite them at runtime.
+
+A dynamic variant returns the multiply-accumulates it executed, including its own gate and bypass layers, relative to the static network. The scheduler scales the node's nominal latency by it, so lower quality shortens the injected plan delay. The ratio can exceed 1 when a gate costs more than it saves, so a dynamic network is never reported as cheaper than it is. The startup output lists the variant and quality of every DNN. The CSV log has `q_<node>` and `cost_<node>` columns per DNN per tick (quality 1 for a static net), and the run summary gives each DNN's mean quality and mean / min / max cost. `SimOptions.dnn` overrides the `params.h` selection for a single run, which the tests use to run the static and dynamic pipelines side by side.
+
+| Network | Dynamic mechanism |
+|---|---|
+| `ImageDenoiseNet` | Convolves only the bottom `ceil(q·H)` rows; rows above take a 1×1 identity bypass conv. |
+| `LaneSegNet` | Early exit per pixel: a Conv1×1 ReLU gate layer lets the ridge channel run only on pixels brighter than `(1−q)·LANESEG_EXIT_LEVEL_MAX`. |
+| `VehicleDetector2D` | Early exit per pixel: a MaxPool3×3 → Conv1×1 ReLU gate network lets the heat-map conv run only where the neighborhood is dark enough. Exact at q = 1. |
+| `PointFilterNet` | Exact early exit for points below the ground band, plus hidden-unit pruning to `ceil(q·2)`. |
+| `VehicleDetector3D` | Sparse BEV: a Conv1×1 ReLU gate layer lets the conv run only on cells with at least `ceil((1−q)·DET3D_MIN_POINTS)` points. |
+| `LaneGeometryNet` | Samples the first `ceil(q·6)` anchors (≥ 3) and uses the matching least-squares Dense(k→3) head. |
+| `MonoDepthNet` | Evaluates the first `ceil(q·3)` range hypotheses and fuses them with a renormalized Dense(k→1). |
+
+At q = 1 each variant matches its static network (`tests/test_dynamic.c`). Every dynamic decision is made by a layer: pruned sizes are slices of the real weights, early-exit gates are small conv/pool networks, and the bypass is an identity conv. Only the final thresholding of a gate's output into a skip mask is plain code. Gate and bypass MACs count toward the node's cost.
 
 ### Estimation, planning, control
 
@@ -78,7 +96,7 @@ All networks are built from two layer types in `src/nn/nn.c` (`Conv2dLayer`, `De
 
 The base step is 10 ms. Control and the plant run at 100 Hz. Sensors and the pipeline run at 20 Hz (`PIPELINE_DECIMATION`).
 
-Each plan goes through a delay line (`pipeline/plan_delay.c`) before the controllers see it. It is released `SENSOR_LATENCY_MS` plus the pipeline's critical-path latency after its sensors were captured, rounded up to whole 10 ms steps. With the defaults that is 20 ms + 17 ms, which rounds up to 40 ms. The controllers hold the newest released plan until the next one arrives (zero-order hold). The `delay_ms` log column and the run summary report the injected delay. Set `LATENCY_INJECTION` to 0 in `config/params.h` to apply each plan in the step its sensors were captured, as before.
+Each plan goes through a delay line (`pipeline/plan_delay.c`) before the controllers see it. It is released exactly `SENSOR_LATENCY_MS` plus the pipeline's critical-path latency after its sensors were captured, without rounding to sim steps. With the defaults that is 20 ms + 10.9 ms = 30.9 ms (37 ms with all-static DNNs). Plan arrival is an event: when a plan arrives inside a 10 ms step, the plant is integrated up to the arrival time with the old command, and the controllers recompute with the new plan for the rest of the step. This way latency differences smaller than a step, such as those of the dynamic DNNs, still reach the plant. The controllers hold the newest released plan until the next one arrives (zero-order hold). The `delay_ms` log column reports the injected delay per tick, and the run summary its mean and range. Set `LATENCY_INJECTION` to 0 in `config/params.h` to apply each plan in the step its sensors were captured, as before.
 
 The node latencies in `adas_pipeline.c` are nominal figures for production-sized networks on an automotive ECU. They are not the cost of the tiny hand-set networks here, which run in under 0.6 ms each on a desktop CPU.
 
@@ -128,7 +146,7 @@ adas_sim/
 │   │   ├── vehicle_types.h      VehicleState
 │   │   └── world_types.h        RoadGeometry, WorldState, GroundTruth
 │   ├── common/                  math_utils.h, rng.h, camera_geometry.h (calibration)
-│   ├── nn/                      nn.h: Tensor, Conv2dLayer, DenseLayer
+│   ├── nn/                      nn.h: Tensor, Conv2dLayer, DenseLayer; dynamic.h: quality/variant helpers
 │   ├── sim/  perception/  estimation/  planning/  control/  pipeline/  app/
 │                                (app/ also has sim_runner.h)
 ├── src/

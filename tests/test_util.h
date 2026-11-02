@@ -46,6 +46,7 @@ void test_scheduler(void);
 void test_plan_delay(void);
 void test_world(void);
 void test_metrics(void);
+void test_dynamic(void);
 void test_scenario(void);
 
 #endif /* ADAS_TEST_UTIL_H */

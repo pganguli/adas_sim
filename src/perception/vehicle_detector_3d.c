@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "nn/dynamic.h"
 #include "nn/nn.h"
 #include "params.h"
 #include "types/common_types.h"
@@ -87,16 +88,9 @@ static void suppress_cells(VehicleDetector3D *net, int pix, int piy) {
   }
 }
 
-void vehicle_detector_3d_infer(VehicleDetector3D *net,
-                               const FilteredPointCloud *in,
-                               Detections3D *out) {
-  /* ---- Voxelization + conv head ---- */
-  voxelize(net, in);
-  const ConstTensor x = const_tensor_make(1, BEV_NX, BEV_NY, &net->bev[0][0]);
-  Tensor h = tensor_make(1, BEV_NX, BEV_NY, &net->heat[0][0]);
-  nn_conv2d(&net->conv1, &x, &h);
-
-  /* ---- Decode ---- */
+/** Peak -> box -> suppress decode of net->heat into `out`. */
+static void decode(VehicleDetector3D *net, const FilteredPointCloud *in,
+                   Detections3D *out) {
   out->hdr = in->hdr;
   out->n = 0;
   memset(net->suppressed, 0, sizeof(net->suppressed));
@@ -112,4 +106,42 @@ void vehicle_detector_3d_infer(VehicleDetector3D *net,
     out->boxes[out->n++] = fit_box(in, pix, piy);
     suppress_cells(net, pix, piy);
   }
+}
+
+void vehicle_detector_3d_infer(VehicleDetector3D *net,
+                               const FilteredPointCloud *in,
+                               Detections3D *out) {
+  /* ---- Voxelization + conv head ---- */
+  voxelize(net, in);
+  const ConstTensor x = const_tensor_make(1, BEV_NX, BEV_NY, &net->bev[0][0]);
+  Tensor h = tensor_make(1, BEV_NX, BEV_NY, &net->heat[0][0]);
+  nn_conv2d(&net->conv1, &x, &h);
+
+  decode(net, in, out);
+}
+
+float vehicle_detector_3d_infer_dynamic(VehicleDetector3D *net,
+                                        const FilteredPointCloud *in,
+                                        Detections3D *out, float quality) {
+  const float q = dyn_clamp_quality(quality);
+  const float min_center = ceilf((1.0f - q) * (float)DET3D_MIN_POINTS - 1e-4f);
+
+  voxelize(net, in);
+  const ConstTensor x = const_tensor_make(1, BEV_NX, BEV_NY, &net->bev[0][0]);
+  Tensor h = tensor_make(1, BEV_NX, BEV_NY, &net->heat[0][0]);
+  /* Exit gate: ReLU(count - (m - 0.5)); counts are integers, so it is
+   * positive exactly for cells with at least m points. */
+  const float gate_w[1] = {1.0f};
+  const float gate_b[1] = {0.5f - min_center};
+  const Conv2dLayer gate = {1, 1, 1, gate_w, gate_b, ACT_RELU, PAD_ZERO};
+  Tensor g = tensor_make(1, BEV_NX, BEV_NY, &net->gate[0][0]);
+  long macs = nn_conv2d_roi(&gate, &x, &g, 0, BEV_NX, NULL);
+  const ConstTensor gin = tensor_as_const(&g);
+  nn_exit_mask(&gin, &net->exited[0][0]);
+
+  memset(net->heat, 0, sizeof(net->heat)); /* ReLU response of a skipped cell */
+  macs += nn_conv2d_roi(&net->conv1, &x, &h, 0, BEV_NX, &net->exited[0][0]);
+
+  decode(net, in, out);
+  return dyn_cost(macs, nn_conv2d_macs(&net->conv1, BEV_NX, BEV_NY));
 }
